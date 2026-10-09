@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jury Portal - Admin</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/admin.css">
+    <link rel="stylesheet" href="css/reliability.css">
+    <link rel="stylesheet" href="css/brand.css">
+</head>
+<body>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="portal-identity"><span class="portal-mark" aria-hidden="true">J</span><div>Jury Portal<span class="workspace-role">Admin workspace</span></div></div>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#" data-target="dashboard" class="active">Dashboard</a></li>
+                <li><a href="#" data-target="teams">Teams</a></li>
+                <li><a href="#" data-target="juries">Juries</a></li>
+                <li><a href="#" data-target="venues">Venues</a></li>
+                <li><a href="#" data-target="criteria">Scoring Criteria</a></li>
+                <li><a href="#" data-target="leaderboard">Leaderboard</a></li>
+                <li><a href="#" data-target="audit">Audit Log</a></li>
+                <li style="margin-top: auto;"><a href="#" id="logout-btn">Logout</a></li>
+            </ul>
+        </aside>
+
+        <main class="main-content">
+            <div class="workspace-heading">Hackathon Evaluation System <span>Organizer workspace</span></div>
+            <!-- Dashboard Section -->
+            <section id="dashboard" class="page-section active">
+                <div class="header-flex">
+                    <h2>Dashboard</h2>
+                    <button class="btn-danger" id="master-reset-btn">Master Reset</button>
+                </div>
+                
+                <div class="dashboard-grid">
+                    <div class="stat-card">
+                        <div class="stat-title">Total Teams</div>
+                        <div class="stat-value" id="stat-total-teams">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Completed Teams</div>
+                        <div class="stat-value" id="stat-completed-teams">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Pending Teams</div>
+                        <div class="stat-value" id="stat-pending-teams">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Active Juries</div>
+                        <div class="stat-value" id="stat-active-juries">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Total Venues</div>
+                        <div class="stat-value" id="stat-total-venues">-</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Overall Evaluation Progress</h3>
+                    <p id="progress-text">0 / 0 evaluations completed</p>
+                    <div class="progress-container">
+                        <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Venues Section -->
+            <section id="venues" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Venues</h2>
+                    <button class="btn-primary" data-open-modal="venue-modal">Add Venue</button>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Capacity</th>
+                                <th>Teams</th>
+                                <th>Juries</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="venues-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+
+            <!-- Criteria Section -->
+            <section id="criteria" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Scoring Criteria</h2>
+                    <button class="btn-primary" data-open-modal="criterion-modal">Add Criterion</button>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Order</th>
+                                <th>Name</th>
+                                <th>Max Marks</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="criteria-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Teams Section -->
+            <section id="teams" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Teams</h2>
+                    <div>
+                        <button class="btn-secondary" data-open-modal="team-import-modal">Import Excel/CSV</button>
+                        <button class="btn-primary" data-open-modal="team-modal">Add Team</button>
+                    </div>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Number</th>
+                                <th>Name</th>
+                                <th>Venue</th>
+                                <th>Juries</th>
+                                <th>Jury Scores</th>
+                                <th>Status</th>
+                                <th>Final Score</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="teams-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Juries Section -->
+            <section id="juries" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Juries</h2>
+                    <button class="btn-primary" data-open-modal="jury-modal">Add Jury</button>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Username</th>
+                                <th>Venue</th>
+                                <th>Assigned Teams</th>
+                                <th>Completed</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="juries-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Leaderboard Section -->
+            <section id="leaderboard" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Leaderboard</h2>
+                    <a href="/api/reports/detailed-results" class="btn-primary" style="text-decoration: none;">Download Detailed Results CSV</a>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Rank</th>
+                                <th>Team</th>
+                                <th>Venue</th>
+                                <th>Final Score</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="leaderboard-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Audit Log Section -->
+            <section id="audit" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Audit Log</h2>
+                </div>
+                <div class="card table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>User</th>
+                                <th>Action</th>
+                                <th>Entity</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <footer class="brand-footer"><span>Developed by <strong>Ratiio</strong></span><span class="footer-logo"><img src="assets/ratiio-logo.jpg" alt="Ratiio" width="320" height="320"></span></footer>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <!-- Venue Modal -->
+    <div id="venue-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add Venue</h3>
+                <button class="modal-close" data-close-modal="venue-modal" aria-label="Close">&times;</button>
+            </div>
+            <form id="venue-form">
+                <input type="hidden" name="id" id="venue-id">
+                <div class="form-group">
+                    <label>Venue Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Capacity</label>
+                    <input type="number" name="capacity" min="1" max="100000" required>
+                </div>
+                <button type="submit" class="btn-primary">Save</button>
+            </form>
+        </div>
+    </div>
+
+
+    <!-- Criterion Modal -->
+    <div id="criterion-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add Scoring Criterion</h3>
+                <button class="modal-close" data-close-modal="criterion-modal" aria-label="Close">&times;</button>
+            </div>
+            <form id="criterion-form">
+                <input type="hidden" name="id" id="criterion-id">
+                <div class="form-group">
+                    <label>Criterion Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Max Marks</label>
+                    <input type="number" name="max_marks" min="0.01" max="10000" step="any" required>
+                </div>
+                <div class="form-group">
+                    <label>Display Order</label>
+                    <input type="number" name="display_order" min="0" max="10000" required>
+                </div>
+                <button type="submit" class="btn-primary">Save</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Team Modal -->
+    <div id="team-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add Team</h3>
+                <button class="modal-close" data-close-modal="team-modal" aria-label="Close">&times;</button>
+            </div>
+            <form id="team-form">
+                <input type="hidden" name="id" id="team-id">
+                <div class="form-group">
+                    <label>Team Number</label>
+                    <input type="text" name="team_number" required>
+                </div>
+                <div class="form-group">
+                    <label>Team Name</label>
+                    <input type="text" name="team_name" required>
+                </div>
+                <div class="form-group">
+                    <label>Venue</label>
+                    <select name="venue_id" id="team-venue-select" required></select>
+                </div>
+                <button type="submit" class="btn-primary">Save</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Team Import Modal -->
+    <div id="team-import-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Import Teams</h3>
+                <button class="modal-close" data-close-modal="team-import-modal" aria-label="Close">&times;</button>
+            </div>
+            <form id="team-import-form">
+                <div class="form-group">
+                    <label>File (CSV/Excel)</label>
+                    <input type="file" name="file" accept=".csv, .xlsx" required>
+                </div>
+                <p style="font-size: 0.8rem; margin-bottom: 1rem; color: var(--text-muted);">
+                    Format: teamNumber, teamName, venue (use exact venue names)
+                </p>
+                <div style="display: flex; gap: 1rem;">
+                    <a href="/assets/teams_template.csv" class="btn-secondary" download style="text-align: center; text-decoration: none;">Download Template</a>
+                    <button type="submit" class="btn-primary">Import</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Jury Modal -->
+    <div id="jury-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Add Jury</h3>
+                <button class="modal-close" data-close-modal="jury-modal" aria-label="Close">&times;</button>
+            </div>
+            <form id="jury-form">
+                <input type="hidden" name="id" id="jury-id">
+                <div class="form-group">
+                    <label>Full Name</label>
+                    <input type="text" name="name" required>
+                </div>
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" name="password" minlength="10" autocomplete="new-password" required>
+                </div>
+                <div class="form-group">
+                    <label>Assigned Venue</label>
+                    <select name="venue_id" id="jury-venue-select" required></select>
+                </div>
+                <div class="form-group">
+                    <label>Active</label>
+                    <select name="active">
+                        <option value="1">Yes</option>
+                        <option value="0">No</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn-primary">Save</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Team Details / Unlock Modal -->
+    <div id="team-details-modal" class="modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 id="td-title">Team Details</h3>
+                <button class="modal-close" data-close-modal="team-details-modal" aria-label="Close">&times;</button>
+            </div>
+            <div id="td-content"></div>
+        </div>
+    </div>
+
+    <script src="js/common.js"></script>
+    <script src="js/theme.js"></script>
+    <script src="js/admin.js"></script>
+</body>
+</html>

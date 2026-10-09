@@ -1,0 +1,30 @@
+.portal-notice { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 10000; padding: 1rem 1.5rem; max-width: min(90vw, 650px); background: var(--card-bg); color: var(--text-main); border: 2px solid var(--success-green); border-radius: 8px; box-shadow: var(--shadow-md); white-space: pre-wrap; }
+.portal-notice.error { border-color: var(--error-red); }
+.portal-notice[hidden] { display: none; }
+.account-dialog { margin: auto; padding: 2rem; width: min(90vw, 480px); background: var(--bg-color); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 12px; }
+.account-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.account-dialog p { margin: 1rem 0; }
+.account-error { color: var(--error-red); }
+.account-button { margin: 1rem; }
+.assignment-content { max-height: 85vh; overflow-y: auto; }
+.assignment-row { display: flex; gap: .75rem; align-items: center; padding: .8rem 0; border-bottom: 1px solid var(--border-color); }
+.assignment-row input { width: auto; flex: 0 0 auto; }
+#eval-actions { display: flex; gap: .5rem; }
+.main-content { min-width: 0; }
+.sidebar { flex-shrink: 0; transition: background-color .3s, color .3s, border-color .3s; }
+.team-name, .criterion-name, .assignment-row span { min-width: 0; overflow-wrap: anywhere; }
+button:disabled { opacity: .6; cursor: not-allowed; }
+td { overflow-wrap: anywhere; }
+:focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 3px; }
+@media (max-width: 768px) {
+    .layout { display: block; }
+    .sidebar { position: static; width: 100%; height: auto; }
+    .nav-links { display: flex; flex-wrap: wrap; white-space: normal; }
+    .nav-links li { margin: 0; }
+    .main-content { margin-left: 0; padding: 1rem; width: 100%; }
+    .header-flex { flex-wrap: wrap; gap: .75rem; }
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .criterion-header { flex-wrap: wrap; gap: .5rem; }
+    .header-flex h2 { overflow-wrap: anywhere; }
+    .modal-content { width: calc(100% - 2rem); max-height: 90vh; overflow-y: auto; }
+}

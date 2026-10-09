@@ -1,0 +1,35 @@
+{
+  "name": "juryportal",
+  "version": "1.0.0",
+  "description": "Hackathon jury scoring portal for Vercel and Turso, with a local recovery option",
+  "main": "app.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/test.js",
+    "backup": "node scripts/backup.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": "24.x"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^13.0.3",
+    "csv-parse": "^7.0.3",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.1",
+    "express-session": "^1.19.0",
+    "helmet": "^8.3.0",
+    "multer": "^2.4.0"
+  }
+}

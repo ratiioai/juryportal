@@ -1,0 +1,9 @@
+node_modules
+backups
+database/*.db*
+database/.session-secret
+uploads
+.tmp
+test
+.env*
+Start-Portal.cmd

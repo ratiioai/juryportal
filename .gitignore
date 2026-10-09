@@ -1,0 +1,10 @@
+node_modules/
+database/*.db*
+database/.session-secret
+backups/
+uploads/
+.env*
+!.env.example
+*.pem
+*.key
+.tmp/

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jury Portal - Evaluation</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="css/jury.css">
+    <link rel="stylesheet" href="css/reliability.css">
+    <link rel="stylesheet" href="css/brand.css">
+</head>
+<body>
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="portal-identity"><span class="portal-mark" aria-hidden="true">J</span><div>Jury Portal<span class="workspace-role">Jury workspace</span></div></div>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#" data-target="dashboard" class="active">My Dashboard</a></li>
+                <li><a href="#" data-target="teams">My Assigned Teams</a></li>
+                <li style="margin-top: auto;"><a href="#" id="logout-btn">Logout</a></li>
+            </ul>
+        </aside>
+
+        <main class="main-content">
+            <div class="workspace-heading">Hackathon Evaluation System <span>Jury workspace</span></div>
+            <!-- Dashboard Section -->
+            <section id="dashboard" class="page-section active">
+                <div class="header-flex">
+                    <h2 id="jury-welcome">Welcome, Jury</h2>
+                    <span class="badge badge-completed" id="jury-venue-badge">Venue: -</span>
+                </div>
+                
+                <div class="dashboard-grid">
+                    <div class="stat-card">
+                        <div class="stat-title">Total Teams</div>
+                        <div class="stat-value" id="stat-total-teams">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Completed</div>
+                        <div class="stat-value" id="stat-completed-teams">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-title">Pending</div>
+                        <div class="stat-value" id="stat-pending-teams">-</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>Your Progress</h3>
+                    <p id="progress-text">0% Completed</p>
+                    <div class="progress-container">
+                        <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Teams Section -->
+            <section id="teams" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>My Assigned Teams</h2>
+                    <button class="btn-primary" id="btn-submit-all" disabled>Submit All Evaluations</button>
+                </div>
+                <div class="dashboard-grid" id="teams-grid">
+                    <!-- Teams will be loaded here as cards -->
+                </div>
+            </section>
+
+            <!-- Evaluation Section -->
+            <section id="evaluation" class="page-section hidden">
+                <div class="header-flex">
+                    <h2>Evaluate Team <span id="eval-team-number"></span></h2>
+                    <button class="btn-secondary" id="back-to-teams">Back to Teams</button>
+                </div>
+                
+                <div class="card">
+                    <h3 id="eval-team-name"></h3>
+                    <p style="color: var(--text-muted); margin-bottom: 0.5rem;">Venue: <span id="eval-venue"></span></p>
+                </div>
+
+                <div class="card">
+                    <form id="evaluation-form">
+                        <input type="hidden" id="eval-team-id">
+                        <div id="criteria-container">
+                            <!-- Criteria inputs will be injected here -->
+                        </div>
+                        
+                        <div class="eval-footer">
+                            <div>
+                                <h3>Total Score</h3>
+                                <p style="font-size: 1.5rem; font-weight: bold; color: var(--primary-blue);" id="total-score-display">0 / 100</p>
+                            </div>
+                            <div id="eval-actions">
+                                <button type="button" class="btn-primary" id="btn-save-draft">Save Score (Draft)</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </section>
+            <footer class="brand-footer"><span>Developed by <strong>Ratiio</strong></span><span class="footer-logo"><img src="assets/ratiio-logo.jpg" alt="Ratiio" width="320" height="320"></span></footer>
+        </main>
+    </div>
+
+    <script src="js/common.js"></script>
+    <script src="js/theme.js"></script>
+    <script src="js/jury.js"></script>
+</body>
+</html>
