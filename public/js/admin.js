@@ -2,7 +2,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const { api, send, escape: esc, notice, busy } = Portal;
     const cache = {}, sectionNames = ['dashboard', 'teams', 'juries', 'venues', 'criteria', 'leaderboard', 'audit'];
     let current = 'dashboard', loadVersion = 0, readOnly = false, roundState, venuesCache;
-    const roundSelect = document.getElementById('round-select'), startRoundButton = document.getElementById('start-round-btn');
+    const roundSelect = document.getElementById('round-select'), startRoundButton = document.getElementById('start-round-btn'), manageRoundsButton = document.getElementById('manage-rounds-btn');
     const badge = status => `<span class="badge ${['Completed', 'submitted'].includes(status) ? 'badge-completed' : ['draft', 'Partially Evaluated'].includes(status) ? 'badge-partial' : 'badge-pending'}">${esc(status)}</span>`;
     const actions = (type, id) => readOnly ? 'Archived' : `<button class="btn-secondary" data-edit="${type}" data-id="${id}">Edit</button> <button class="btn-danger" data-delete="${type}" data-id="${id}">Delete</button>`;
     function selectRound(id) {
@@ -12,35 +12,83 @@ document.addEventListener('DOMContentLoaded', async () => {
         Portal.selectRound(round.id, readOnly);
         document.getElementById('round-status').textContent = readOnly ? `${round.name} is archived. Its teams, scores and reports are read-only.` : `${round.name} is active. Start a new round to preserve these results and begin with blank scores.`;
         document.querySelectorAll('[data-open-modal]').forEach(button => { button.hidden = readOnly; });
-        document.getElementById('master-reset-btn').hidden = readOnly; startRoundButton.disabled = readOnly;
+        document.getElementById('master-reset-btn').hidden = readOnly; startRoundButton.disabled = false; manageRoundsButton.disabled = false;
         document.querySelector('a[href^="/api/reports/detailed-results"]').href = `/api/reports/detailed-results?round=${round.id}`;
         for (const key of Object.keys(cache)) delete cache[key];
         venuesCache = undefined;
     }
-    async function refreshRounds() {
+    async function refreshRounds(selectedId) {
         roundState = await api('/api/rounds'); Portal.setRound(roundState.active);
-        roundSelect.innerHTML = roundState.rounds.map(r => `<option value="${r.id}">${esc(r.name)}${r.archived_at ? ' · Archived' : ' · Active'}</option>`).join('');
-        selectRound(roundState.active.id);
+        const available = roundState.rounds.filter(r => !r.removed_at);
+        roundSelect.innerHTML = available.map(r => `<option value="${r.id}">${esc(r.name)}${r.archived_at ? ' · Archived' : ' · Active'}</option>`).join('');
+        selectRound(available.some(r => r.id === Number(selectedId)) ? selectedId : roundState.active.id);
     }
     roundSelect.addEventListener('change', () => { selectRound(roundSelect.value); load().catch(e => notice(e.message, true)); });
     startRoundButton.addEventListener('click', () => {
-        if (readOnly) return;
         const dialog = document.createElement('dialog'); dialog.className = 'account-dialog';
-        dialog.innerHTML = `<h2>Start a new judging round</h2><p>${esc(roundState.active.name)} will be archived with its scores and reports. Judges will score the new round.</p>
+        dialog.setAttribute('aria-labelledby', 'start-round-title');
+        dialog.innerHTML = `<h2 id="start-round-title">Start a new judging round</h2><p>${esc(roundState.active.name)} will be archived with its scores and reports. Judges will score the new round.</p>
             <form><div class="form-group"><label for="new-round-name">Round name</label><input id="new-round-name" maxlength="80" value="Round ${roundState.rounds.length + 1}" required></div>
             <label class="assignment-row"><input type="checkbox" id="carry-round-teams" checked> Keep teams and jury assignments</label>
             <p>Venues, scoring criteria and jury accounts are kept. Scores start blank. Uncheck the option to import a new team roster.</p>
-            <button class="btn-primary" type="submit">Start round</button> <button class="btn-secondary" type="button" data-cancel>Cancel</button></form>`;
+            <p class="account-error" role="alert"></p><button class="btn-primary" type="submit">Start round</button> <button class="btn-secondary" type="button" data-cancel>Cancel</button></form>`;
         document.body.appendChild(dialog); dialog.showModal();
+        dialog.querySelector('#new-round-name').select();
         const close = () => { dialog.close(); dialog.remove(); };
         dialog.querySelector('[data-cancel]').addEventListener('click', close); dialog.addEventListener('cancel', () => dialog.remove());
         dialog.querySelector('form').addEventListener('submit', event => {
             event.preventDefault(); busy(dialog.querySelector('[type=submit]'), async () => {
-                const result = await send('/api/rounds', { name: dialog.querySelector('#new-round-name').value, keep_teams: dialog.querySelector('#carry-round-teams').checked });
-                Portal.setRound(result.round); close(); notice(result.message); await refreshRounds(); navigate('dashboard');
+                const errorBox = dialog.querySelector('.account-error'); errorBox.textContent = '';
+                dialog.querySelector('[data-cancel]').disabled = true;
+                try {
+                    const result = await send('/api/rounds', { name: dialog.querySelector('#new-round-name').value, keep_teams: dialog.querySelector('#carry-round-teams').checked });
+                    Portal.setRound(result.round); close(); notice(result.message); await refreshRounds(); navigate('dashboard');
+                } catch (error) { errorBox.textContent = error.message; }
+                finally { dialog.querySelector('[data-cancel]').disabled = false; }
             });
         });
     });
+    manageRoundsButton.addEventListener('click', () => busy(manageRoundsButton, async () => {
+        await refreshRounds(roundSelect.value);
+        const dialog = document.createElement('dialog'); dialog.className = 'account-dialog rounds-dialog';
+        dialog.setAttribute('aria-labelledby', 'manage-rounds-title');
+        dialog.innerHTML = `<h2 id="manage-rounds-title">Manage judging rounds</h2><p>Open a round to view its teams, scores and reports. Rename rounds or remove archived rounds from history. Removed rounds can be restored with their scores.</p>
+            <div class="round-list"></div><p class="account-error" role="alert"></p><div class="round-dialog-actions"><button class="btn-primary" type="button" data-new-round>Start new round</button><button class="btn-secondary" type="button" data-close-rounds>Close</button></div>`;
+        const renderRounds = () => {
+            dialog.querySelector('.round-list').innerHTML = roundState.rounds.map(round => `<section class="round-card" data-round-id="${round.id}">
+                <div><strong>${esc(round.name)}</strong><p>${round.removed_at ? 'Removed · Scores retained' : round.archived_at ? 'Archived · Read-only results' : 'Active · Juries are scoring this round'}</p></div>
+                <div class="round-card-actions">${round.removed_at ? '<button class="btn-secondary" type="button" data-round-action="restore">Restore</button>' : `<button class="btn-secondary" type="button" data-round-action="open">Open round</button><button class="btn-secondary" type="button" data-round-action="rename">Rename</button><button class="btn-danger" type="button" data-round-action="remove" ${round.archived_at ? '' : 'disabled title="Start a new round before removing this round"'}>Remove</button>`}</div>
+                <form class="round-rename-form" hidden><label for="round-name-${round.id}">Round name</label><input id="round-name-${round.id}" value="${esc(round.name)}" maxlength="80" required><button class="btn-primary" type="submit">Save name</button><button class="btn-secondary" type="button" data-round-action="cancel-rename">Cancel</button></form>
+                <div class="round-remove-confirm" hidden><p>Remove ${esc(round.name)} from history? Its scores will be retained and you can restore it here.</p><button class="btn-danger" type="button" data-round-action="confirm-remove">Remove round</button><button class="btn-secondary" type="button" data-round-action="cancel-remove">Cancel</button></div></section>`).join('');
+        };
+        const close = () => { dialog.close(); dialog.remove(); };
+        renderRounds(); document.body.appendChild(dialog); dialog.showModal();
+        dialog.querySelector('[data-close-rounds]').addEventListener('click', close);
+        dialog.addEventListener('cancel', () => dialog.remove());
+        dialog.querySelector('[data-new-round]').addEventListener('click', () => { close(); startRoundButton.click(); });
+        async function change(button, work) {
+            await busy(button, async () => {
+                dialog.querySelector('.account-error').textContent = '';
+                try { const result = await work(); await refreshRounds(roundSelect.value); renderRounds(); await load(); notice(result.message); }
+                catch (error) { dialog.querySelector('.account-error').textContent = error.message; }
+            });
+        }
+        dialog.addEventListener('click', event => {
+            const button = event.target.closest('[data-round-action]'); if (!button || button.disabled) return;
+            const card = button.closest('[data-round-id]'), id = Number(card.dataset.roundId), round = roundState.rounds.find(r => r.id === id);
+            if (button.dataset.roundAction === 'open') { selectRound(id); navigate('dashboard'); close(); }
+            else if (button.dataset.roundAction === 'rename') { card.querySelector('form').hidden = false; card.querySelector('input').select(); }
+            else if (button.dataset.roundAction === 'cancel-rename') card.querySelector('form').hidden = true;
+            else if (button.dataset.roundAction === 'restore') change(button, () => send(`/api/rounds/${id}/restore`, {}));
+            else if (button.dataset.roundAction === 'remove') { card.querySelector('.round-remove-confirm').hidden = false; card.querySelector('[data-round-action="confirm-remove"]').focus(); }
+            else if (button.dataset.roundAction === 'cancel-remove') card.querySelector('.round-remove-confirm').hidden = true;
+            else if (button.dataset.roundAction === 'confirm-remove') change(button, () => api(`/api/rounds/${id}`, { method: 'DELETE' }));
+        });
+        dialog.addEventListener('submit', event => {
+            event.preventDefault(); const form = event.target, id = Number(form.closest('[data-round-id]').dataset.roundId);
+            change(form.querySelector('[type=submit]'), () => send(`/api/rounds/${id}`, { name: form.querySelector('input').value }, 'PUT'));
+        });
+    }));
     function modal(id, open = true) {
         const element = document.getElementById(id); element.classList.toggle('active', open);
         element.setAttribute('role', 'dialog'); element.setAttribute('aria-modal', 'true');

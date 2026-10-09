@@ -6,7 +6,7 @@
     <title>Jury Portal - Admin</title>
     <link rel="stylesheet" href="css/style.css">
     <link rel="stylesheet" href="css/admin.css">
-    <link rel="stylesheet" href="css/reliability.css">
+    <link rel="stylesheet" href="css/reliability.css?v=round-manager-3">
     <link rel="stylesheet" href="css/brand.css">
 </head>
 <body>
@@ -32,6 +32,7 @@
             <div class="round-controls">
                 <div><label for="round-select">Judging round</label><select id="round-select" aria-describedby="round-status"><option>Loading rounds…</option></select></div>
                 <button class="btn-primary" id="start-round-btn" type="button" disabled>Start new round</button>
+                <button class="btn-secondary" id="manage-rounds-btn" type="button" disabled>Manage rounds</button>
                 <p id="round-status" role="status">Loading round history…</p>
             </div>
             <!-- Dashboard Section -->
@@ -364,8 +365,8 @@
         </div>
     </div>
 
-    <script src="js/common.js"></script>
+    <script src="js/common.js?v=round-manager-3"></script>
     <script src="js/theme.js"></script>
-    <script src="js/admin.js"></script>
+    <script src="js/admin.js?v=round-manager-3"></script>
 </body>
 </html>

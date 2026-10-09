@@ -183,7 +183,7 @@ test('the round migration preserves existing teams, drafts and administrator cre
         f.db.prepare("UPDATE portal_meta SET value = '1' WHERE key = 'schema_version'").run();
         const client = require('@libsql/client').createClient({ url: pathToFileURL(f.db.name).href });
         try { await initializeCloud(cloudAdapter(client)); } finally { client.close(); }
-        assert.equal(f.db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get().value, '2');
+        assert.equal(f.db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get().value, '3');
     } else f.db.exec(fs.readFileSync(path.join(__dirname, '../database/schema.sql'), 'utf8'));
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM event_rounds').get().n, 1);
     assert.equal(f.db.prepare('SELECT name FROM event_rounds').get().name, 'Round 1');
@@ -261,6 +261,50 @@ test('score bounds, revision conflicts, atomic bulk submission, lock and unlock'
     assert.equal((await s.save(s.j1, s.t1, s.scores(2, 2), 'submit', 3)).status, 409);
     assert.equal((await s.save(s.j1, s.t1, s.scores(2, 2), 'submit', 4)).status, 200);
     assert.equal((await f.admin.request('/api/criteria', { name: 'Late criterion', max_marks: 10, display_order: 3 })).status, 409);
+});
+
+test('round management renames, removes and restores archives without changing scores', async t => {
+    const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
+    const first = (await f.admin.request('/api/rounds')).data.active;
+    await s.save(s.j1, s.t1, s.scores(10, 10), 'submit');
+    await s.save(s.j2, s.t1, s.scores(8, 8), 'submit');
+    const started = await f.admin.request('/api/rounds', { name: 'Finals', keep_teams: true });
+    assert.equal(started.status, 200);
+    const second = started.data.round;
+    const csv = (await f.admin.request(`/api/reports/detailed-results?round=${first.id}`)).data;
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}`, { name: 'Qualifiers' }, 'PUT')).status, 200);
+    assert.equal((await f.admin.request(`/api/dashboard?round=${first.id}`)).data.round.name, 'Qualifiers');
+    assert.equal((await f.admin.request(`/api/rounds/${second.id}`, { name: 'Final round' }, 'PUT')).status, 200);
+    assert.equal((await f.admin.request('/api/me')).data.round.name, 'Final round');
+    assert.equal((await f.admin.request(`/api/rounds/${second.id}`, undefined, 'DELETE')).status, 409);
+    assert.equal((await s.j1.client.request(`/api/rounds/${first.id}`, undefined, 'DELETE')).status, 403);
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}`, undefined, 'DELETE', { 'X-Portal-Round': String(first.id) })).status, 409);
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}`, undefined, 'DELETE')).status, 200);
+    assert.equal((await f.admin.request(`/api/dashboard?round=${first.id}`)).status, 404);
+    const removed = (await f.admin.request('/api/rounds')).data.rounds.find(r => r.id === first.id);
+    assert.ok(removed.removed_at);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM event_rounds').get().n, 2);
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}`, { name: 'Hidden' }, 'PUT')).status, 409);
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}/restore`, {})).status, 200);
+    assert.equal((await f.admin.request(`/api/reports/detailed-results?round=${first.id}`)).data, csv);
+    assert.equal((await f.admin.request('/api/dashboard')).data.completedEvaluations, 0);
+    assert.equal((await f.admin.request(`/api/rounds/${first.id}`, { name: ' ' }, 'PUT')).status, 400);
+    assert.equal((await f.admin.request('/api/rounds/99999/restore', {})).status, 404);
+    const snapshot = f.db.prepare('SELECT snapshot_json FROM event_rounds WHERE id = ?').get(first.id).snapshot_json;
+    f.db.exec('ALTER TABLE event_rounds DROP COLUMN removed_at');
+    if (process.env.JURY_TEST_MODE === 'cloud') {
+        f.db.prepare("UPDATE portal_meta SET value = '2' WHERE key = 'schema_version'").run();
+        const client = require('@libsql/client').createClient({ url: pathToFileURL(f.db.name).href });
+        try { await initializeCloud(cloudAdapter(client)); } finally { client.close(); }
+    } else {
+        // Use the existing local database file to test the v2 migration without touching an event database.
+        const filename = path.join(f.backupDir, 'v2-rounds.db');
+        await f.db.backup(filename);
+        const migrated = openDatabase(filename);
+        try { assert.ok(migrated.pragma('table_info(event_rounds)').some(c => c.name === 'removed_at')); }
+        finally { migrated.close(); }
+    }
+    assert.equal(f.db.prepare('SELECT snapshot_json FROM event_rounds WHERE id = ?').get(first.id).snapshot_json, snapshot);
 });
 
 test('CSV reconciles assignments, pending/draft scores, quoting, averages and ranks', async t => {

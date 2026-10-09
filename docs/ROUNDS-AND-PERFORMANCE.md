@@ -20,6 +20,12 @@ Chrome UI verification used an isolated in-memory database. Starting Round 2 ret
 
 The jury UI displayed Round 2 with two pending teams and blank scoring forms. Innovation = 19 was saved as a partial draft and persisted when reopened. A mobile viewport measured 382 CSS pixels with no horizontal page overflow. No browser console errors were recorded in this fixture.
 
+## Round management update
+
+Manage rounds lists all rounds with Open round, Rename and Remove actions. Removed archived rounds can be restored with their original scores; the active round cannot be removed. The selector excludes removed rounds, and backups retain them. Round management works while viewing archived results, without making historical scoring forms editable. Start new round always targets the active round, accepts a name, preserves the old round and displays errors inside its dialog. Versioned script URLs prevent old browser assets from mixing with the new controls after refresh.
+
+The schema version 3 migration adds only a nullable removal timestamp. Tests verify migration preserves archived snapshots, rename updates historical metadata, removal hides historical views, restoration produces the same CSV, jury access is rejected, and stale round identifiers cannot manage rounds. The complete suite passes 33 tests with two intentional local-mode skips.
+
 ## Deployment rehearsal
 
 Refresh every browser after deployment, confirm the active round and current scores, then measure representative authenticated navigation and saves on venue Wi-Fi. Use Start new round only when ready to finish the current round. Keep a full backup before judging. The isolated UI and query-count tests do not replace a hosted round-transition rehearsal.

@@ -70,18 +70,19 @@ function cloudAdapter(client) {
 async function initializeCloud(db, adminPassword = process.env.ADMIN_PASSWORD) {
     validateAdminPassword(adminPassword);
     const metadata = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'portal_meta'").get();
-    if (metadata && (await db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get())?.value === '2') return;
+    if (metadata && (await db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get())?.value === '3') return;
     const hash = await bcrypt.hash(adminPassword, 12);
     await db.transaction(async () => {
         // No local database file is read or written in hosted mode.
         const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
         await db.batch(schema.split(';').filter(s => s.trim()));
-        const [users, evaluations] = await db.batch(['PRAGMA table_info(users)', 'PRAGMA table_info(evaluations)']);
+        const [users, evaluations, rounds] = await db.batch(['PRAGMA table_info(users)', 'PRAGMA table_info(evaluations)', 'PRAGMA table_info(event_rounds)']);
         const migrations = [];
         for (const [table, name, definition] of [['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'], ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'], ['evaluations', 'revision', 'INTEGER NOT NULL DEFAULT 1']]) {
             const columns = table === 'users' ? users.rows : evaluations.rows;
             if (!columns.some(c => c.name === name)) migrations.push(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
         }
+        if (!rounds.rows.some(c => c.name === 'removed_at')) migrations.push('ALTER TABLE event_rounds ADD COLUMN removed_at TEXT');
         await db.batch([...migrations,
             'CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, data TEXT NOT NULL, expires INTEGER NOT NULL)',
             'CREATE TABLE IF NOT EXISTS event_backups (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL, created_at TEXT NOT NULL)',
@@ -93,7 +94,7 @@ async function initializeCloud(db, adminPassword = process.env.ADMIN_PASSWORD) {
         ]);
         const admin = await db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
         if (!admin) await db.prepare("INSERT INTO users (name, username, password_hash, role, must_change_password) VALUES ('System Administrator', 'admin', ?, 'admin', 1)").run(hash);
-        await db.prepare("INSERT OR REPLACE INTO portal_meta (key, value) VALUES ('schema_version', '2')").run();
+        await db.prepare("INSERT OR REPLACE INTO portal_meta (key, value) VALUES ('schema_version', '3')").run();
     });
 }
 

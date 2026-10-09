@@ -14,7 +14,8 @@ function openDatabase(filename = process.env.DB_PATH || path.join(__dirname, 'da
     for (const [table, name, definition] of [
         ['users', 'session_version', 'INTEGER NOT NULL DEFAULT 0'],
         ['users', 'must_change_password', 'INTEGER NOT NULL DEFAULT 0'],
-        ['evaluations', 'revision', 'INTEGER NOT NULL DEFAULT 1']
+        ['evaluations', 'revision', 'INTEGER NOT NULL DEFAULT 1'],
+        ['event_rounds', 'removed_at', 'TEXT']
     ]) {
         if (!db.pragma(`table_info(${table})`).some(column => column.name === name)) {
             db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);

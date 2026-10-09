@@ -18,7 +18,7 @@ const Portal = (() => {
         const writes = options.method && !['GET', 'HEAD'].includes(options.method);
         if (writes && !['/api/login', '/api/logout', '/api/password'].includes(url)) {
             if (staleRound) throw new Error('The judging round changed. Refresh the portal before saving.');
-            if (roundIsArchived) throw new Error('Earlier rounds are read-only. Switch to the active round.');
+            if (roundIsArchived && !/^\/api\/rounds(?:\/|$)/.test(url)) throw new Error('Earlier rounds are read-only. Switch to the active round.');
             options = { ...options, headers: { ...options.headers, ...(roundId ? { 'X-Portal-Round': String(roundId) } : {}) } };
         }
         if (scoped && selectedRound) url += `${url.includes('?') ? '&' : '?'}round=${selectedRound}`;

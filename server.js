@@ -155,7 +155,7 @@ function createApp({
       if (user.role !== 'admin') fail('Only administrators can view earlier rounds.', 403);
       if (req.method !== 'GET') fail('Earlier rounds are read-only. Switch to the active round.', 409);
       const round = await db.prepare('SELECT * FROM event_rounds WHERE id = ?').get(number(req.query.round, 'Round ID'));
-      if (!round?.snapshot_json) fail('Round not found.', 404);
+      if (!round?.snapshot_json || round.removed_at) fail('Round not found. Restore removed rounds from Manage rounds.', 404);
       if (!/^\/api\/(dashboard|teams(?:\/\d+)?|venues|criteria|juries|leaderboard|audit-logs|reports\/detailed-results)$/.test(req.path)) fail('This view is not available for archived rounds.', 409);
       req.roundSnapshot = JSON.parse(round.snapshot_json);
       req.selectedRound = { id: round.id, name: round.name, archived_at: round.archived_at };
@@ -287,7 +287,7 @@ function createApp({
     });
   });
   app.get('/api/rounds', auth(), async (req, res) => {
-    const rounds = req.user.role === 'admin' ? await db.prepare('SELECT id, name, started_at, archived_at FROM event_rounds ORDER BY id DESC').all() : [req.activeRound];
+    const rounds = req.user.role === 'admin' ? await db.prepare('SELECT id, name, started_at, archived_at, removed_at FROM event_rounds ORDER BY id DESC').all() : [req.activeRound];
     res.json({ active: req.activeRound, rounds });
   });
   app.post('/api/rounds', admin, async (req, res) => {
@@ -307,6 +307,40 @@ function createApp({
     req.session.user.round_id = id;
     res.set('X-Portal-Round', String(id));
     res.json({ message: `${name} started. ${req.activeRound.name} remains available in round history.`, round: { id, name } });
+  });
+  app.put('/api/rounds/:id', admin, async (req, res) => {
+    const id = number(req.params.id, 'Round ID'), name = text(req.body.name, 'Round name', 80);
+    await db.transaction(async () => {
+      await assertRound(req);
+      const round = await get('event_rounds', id);
+      if (round.removed_at) fail('Restore this round before renaming it.', 409);
+      await db.prepare('UPDATE event_rounds SET name = ? WHERE id = ?').run(name, id);
+      await audit(req, 'RENAME_ROUND', 'round', id, `Renamed ${round.name} to ${name}`);
+    });
+    res.json({ message: 'Round renamed.' });
+  });
+  app.delete('/api/rounds/:id', admin, async (req, res) => {
+    const id = number(req.params.id, 'Round ID');
+    await db.transaction(async () => {
+      await assertRound(req);
+      const round = await get('event_rounds', id);
+      if (!round.archived_at) fail('The active round cannot be removed. Start a new round first.', 409);
+      if (round.removed_at) fail('This round is already removed.', 409);
+      await db.prepare('UPDATE event_rounds SET removed_at = ? WHERE id = ?').run(new Date().toISOString(), id);
+      await audit(req, 'REMOVE_ROUND', 'round', id, `Removed ${round.name} from history; scores retained for restoration`);
+    });
+    res.json({ message: 'Round removed from history. Its scores are retained; use Manage rounds to restore it.' });
+  });
+  app.post('/api/rounds/:id/restore', admin, async (req, res) => {
+    const id = number(req.params.id, 'Round ID');
+    await db.transaction(async () => {
+      await assertRound(req);
+      const round = await get('event_rounds', id);
+      if (!round.removed_at) fail('This round is already available.', 409);
+      await db.prepare('UPDATE event_rounds SET removed_at = NULL WHERE id = ?').run(id);
+      await audit(req, 'RESTORE_ROUND', 'round', id, `Restored ${round.name} to history`);
+    });
+    res.json({ message: 'Round restored with its original teams and scores.' });
   });
   app.get('/api/dashboard', admin, async (req, res) => {
     const tables = await readEvent(db, req), teams = resultViews(tables);
