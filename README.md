@@ -41,6 +41,16 @@ Venue capacity is informational; it does not cap the number of teams assigned.
 
 The leaderboard displays fully evaluated teams only. The CSV also includes pending and unassigned teams so administrators can reconcile missing work.
 
+## Judging rounds
+
+Use **Start new round**, rather than resetting the event, to move from Round 1 to Round 2. The current round is archived atomically with its teams, names, assignments, rubric, drafts and submitted scores. The new round starts with blank evaluations. Jury accounts, venues and criteria remain available; keep teams and assignments by default, or uncheck that option to import a fresh roster.
+
+The admin **Judging round** selector opens either the active round or an earlier read-only round. Dashboard totals, team details, leaderboard, venues, juries, rubric and detailed CSV reflect the selected round. Earlier rounds cannot be edited or reopened for judging. Judges see the active round name. Old forms are rejected after a round transition; refresh and reopen the evaluation before scoring the new round.
+
+Existing event data becomes **Round 1** automatically when this version starts. Full JSON/SQLite backups include round history. **Reset event setup** is for a different event: it still saves a backup, preserves archived rounds and audit history, clears current event setup and revokes jury accounts.
+
+After deploying this update, refresh every admin and jury browser once so it loads the new round-aware controls. Login sessions expire after 12 hours and no longer rewrite the database on each ordinary read.
+
 ## Backups and recovery
 
 - While the server runs, an online SQLite backup is written to `backups/` every 15 minutes. Check free disk space before the event; automatic backups are retained.
@@ -49,7 +59,7 @@ The leaderboard displays fully evaluated teams only. The CSV also includes pendi
 - Copy backups to a separate USB drive or another device. Backups on the same laptop do not protect against laptop failure.
 - To restore: stop the server, preserve the current `database/` folder, then place the selected backup in a clean database folder as `database.db`. Move the old `database.db-wal` and `database.db-shm` files out with the old database; never pair them with a restored database. Start the portal again and log in. Restoring an older snapshot also restores the passwords stored in that snapshot.
 - `database/.session-secret` is generated automatically and must remain private. Keep it across ordinary restarts. If it is missing on recovery, a new secret is generated and everyone logs in again.
-- **Master Reset** requires typing `RESET EVENT`. It first saves a backup, clears event data, retains audit history and administrator accounts, and logs everyone out. Use only when preparing a new event.
+- **Reset event setup** requires typing `RESET EVENT`. It first saves a backup, archives the current round, clears event data, retains earlier rounds, audit history and administrator accounts, and logs everyone out. Use only when preparing a new event.
 - The original application and database are preserved at `backups/pre-hardening-2026-10-08/`.
 
 ## Venue rehearsal — do this on the actual Wi-Fi

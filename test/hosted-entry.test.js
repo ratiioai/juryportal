@@ -20,11 +20,25 @@ test('Vercel entry rejects missing setup without falling back to a local databas
     assert.equal(first.status, 503);
     assert.equal(first.headers.get('cache-control'), 'no-store');
     assert.equal(first.headers.get('x-powered-by'), null);
-    assert.match((await first.json()).error, /setup is incomplete|database is unavailable/);
+    const firstBody = await first.json();
+    assert.match(firstBody.error, /setup is incomplete|database is unavailable/);
+    assert.equal(firstBody.code, 'HOSTED_CONFIGURATION_INVALID');
+    assert.deepEqual(firstBody.settings.map(s => s.name), ['SESSION_SECRET']);
     process.env.SESSION_SECRET = 'test-only-hosted-entry-secret-32-characters';
     const second = await fetch(url);
     assert.equal(second.status, 503);
-    assert.match((await second.json()).error, /setup is incomplete|database is unavailable/);
+    const secondBody = await second.json();
+    assert.match(secondBody.error, /setup is incomplete|database is unavailable/);
+    assert.deepEqual(secondBody.settings.map(s => s.name), ['TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN']);
+    process.env.TURSO_DATABASE_URL = 'TURSO_DATABASE_URL=libsql://private-database.example';
+    process.env.TURSO_AUTH_TOKEN = 'private-token-never-expose';
+    const malformed = await fetch(url);
+    assert.equal(malformed.status, 503);
+    const malformedBody = await malformed.json();
+    assert.deepEqual(malformedBody.settings.map(s => s.name), ['TURSO_DATABASE_URL']);
+    assert.doesNotMatch(JSON.stringify(malformedBody), /private-database|private-token/);
+    delete process.env.TURSO_DATABASE_URL;
+    delete process.env.TURSO_AUTH_TOKEN;
 });
 
 test('hosted instances share secure sessions and scores; failed startup can recover', async t => {
@@ -53,10 +67,11 @@ test('hosted instances share secure sessions and scores; failed startup can reco
     const health = await Promise.all([fetch(first + '/api/health'), fetch(first + '/api/health')]);
     assert.deepEqual(health.map(r => r.status), [200, 200]); assert.equal(initializations, 1);
     const second = await start();
-    const browser = () => ({ cookie: '', async request(base, route, body) {
-        const headers = { 'X-Forwarded-Proto': 'https', 'X-Requested-With': 'JuryPortal', Cookie: this.cookie };
+    const browser = () => ({ cookie: '', round: null, async request(base, route, body) {
+        const headers = { 'X-Forwarded-Proto': 'https', 'X-Requested-With': 'JuryPortal', Cookie: this.cookie, ...(this.round ? { 'X-Portal-Round': String(this.round) } : {}) };
         if (body) headers['Content-Type'] = 'application/json';
         const response = await fetch(base + route, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+        if (response.ok && response.headers.get('x-portal-round')) this.round = Number(response.headers.get('x-portal-round'));
         const setCookie = response.headers.get('set-cookie'); if (setCookie) this.cookie = setCookie.split(';')[0];
         return { status: response.status, data: await response.json(), setCookie };
     } });
@@ -77,7 +92,12 @@ test('hosted instances share secure sessions and scores; failed startup can reco
     const board = await admin.request(first, '/api/leaderboard'); assert.equal(board.data[0].final_score, '17.50');
     let attempts = 0;
     const recovering = await start(async db => { if (++attempts === 1) throw new Error('Simulated temporary connection failure'); await initializeCloud(db); });
-    assert.equal((await fetch(recovering + '/api/health')).status, 503);
+    const failed = await fetch(recovering + '/api/health');
+    assert.equal(failed.status, 503);
+    const failedBody = await failed.json();
+    assert.equal(failedBody.code, 'HOSTED_STARTUP_FAILED');
+    assert.equal(failedBody.settings, undefined);
+    assert.doesNotMatch(JSON.stringify(failedBody), /Simulated temporary connection failure/);
     assert.equal((await admin.request(recovering, '/api/me')).status, 200);
     assert.equal((await admin.request(recovering, '/api/leaderboard')).data[0].final_score, '17.50');
     assert.equal(attempts, 2);

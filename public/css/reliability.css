@@ -1,6 +1,7 @@
 .portal-notice { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); z-index: 10000; padding: 1rem 1.5rem; max-width: min(90vw, 650px); background: var(--card-bg); color: var(--text-main); border: 2px solid var(--success-green); border-radius: 8px; box-shadow: var(--shadow-md); white-space: pre-wrap; }
 .portal-notice.error { border-color: var(--error-red); }
 .portal-notice[hidden] { display: none; }
+[hidden] { display: none !important; }
 .account-dialog { margin: auto; padding: 2rem; width: min(90vw, 480px); background: var(--bg-color); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 12px; }
 .account-dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .account-dialog p { margin: 1rem 0; }
@@ -14,6 +15,13 @@
 .sidebar { flex-shrink: 0; transition: background-color .3s, color .3s, border-color .3s; }
 .team-name, .criterion-name, .assignment-row span { min-width: 0; overflow-wrap: anywhere; }
 button:disabled { opacity: .6; cursor: not-allowed; }
+.round-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 0 0 1.5rem; padding: 1rem; background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; }
+.round-controls > div { flex: 1 1 180px; min-width: 0; }
+.round-controls label { display: block; margin-bottom: .4rem; font-weight: 600; }
+.round-controls select { width: 100%; max-width: 100%; min-height: 44px; padding: .65rem; background: var(--card-bg); color: var(--text-main); border: 1px solid var(--border-color); border-radius: 6px; font: inherit; }
+.round-controls p { flex-basis: 100%; margin: 0; font-size: .9rem; }
+.round-banner { margin: 0 0 1rem; padding: .75rem 1rem; border-left: 3px solid var(--primary-blue); background: var(--card-bg); }
+.page-loading { padding: 1rem; color: var(--text-muted); }
 td { overflow-wrap: anywhere; }
 :focus-visible { outline: 3px solid var(--primary-blue); outline-offset: 3px; }
 @media (max-width: 768px) {

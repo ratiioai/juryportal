@@ -2,6 +2,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const fs = require('node:fs');
 const path = require('node:path');
 const bcrypt = require('bcrypt');
+const { databaseSettings, adminPassword: validateAdminPassword } = require('./config');
 
 // Both deployment modes use SQLite SQL and the same awaited application queries.
 function localAdapter(raw) {
@@ -19,6 +20,20 @@ function localAdapter(raw) {
             catch (error) { raw.exec('ROLLBACK'); throw error; }
         }); },
         backup(filename) { return locked(() => raw.backup(filename)); },
+        batch(statements, mode = 'write') { return locked(() => {
+            const execute = () => statements.map(statement => {
+                const sql = typeof statement === 'string' ? statement : statement.sql;
+                const args = typeof statement === 'string' ? [] : statement.args || [];
+                const query = raw.prepare(sql);
+                if (query.reader) return { rows: query.all(...args), rowsAffected: 0 };
+                const result = query.run(...args);
+                return { rows: [], rowsAffected: result.changes, lastInsertRowid: result.lastInsertRowid };
+            });
+            if (raw.inTransaction) return execute();
+            raw.exec(mode === 'read' ? 'BEGIN' : 'BEGIN IMMEDIATE');
+            try { const result = execute(); raw.exec('COMMIT'); return result; }
+            catch (error) { raw.exec('ROLLBACK'); throw error; }
+        }); },
         close() { raw.close(); }
     };
 }
@@ -41,7 +56,7 @@ function cloudAdapter(client) {
             catch (error) { if (!tx.closed) await tx.rollback(); throw error; }
             finally { tx.close(); }
         },
-        batch(statements) { return (context.getStore() || client).batch(statements); },
+        batch(statements, mode = 'write') { return context.getStore() ? context.getStore().batch(statements) : client.batch(statements, mode); },
         async readTransaction(work) {
             if (context.getStore()) return work();
             const tx = await client.transaction('read');
@@ -53,9 +68,9 @@ function cloudAdapter(client) {
 }
 
 async function initializeCloud(db, adminPassword = process.env.ADMIN_PASSWORD) {
-    if (!adminPassword || adminPassword.length < 10 || Buffer.byteLength(adminPassword) > 72) throw new Error('Set ADMIN_PASSWORD to an initial password of 10–72 bytes for hosted deployment.');
+    validateAdminPassword(adminPassword);
     const metadata = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'portal_meta'").get();
-    if (metadata && (await db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get())?.value === '1') return;
+    if (metadata && (await db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get())?.value === '2') return;
     const hash = await bcrypt.hash(adminPassword, 12);
     await db.transaction(async () => {
         // No local database file is read or written in hosted mode.
@@ -78,14 +93,15 @@ async function initializeCloud(db, adminPassword = process.env.ADMIN_PASSWORD) {
         ]);
         const admin = await db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
         if (!admin) await db.prepare("INSERT INTO users (name, username, password_hash, role, must_change_password) VALUES ('System Administrator', 'admin', ?, 'admin', 1)").run(hash);
-        await db.prepare("INSERT OR REPLACE INTO portal_meta (key, value) VALUES ('schema_version', '1')").run();
+        await db.prepare("INSERT OR REPLACE INTO portal_meta (key, value) VALUES ('schema_version', '2')").run();
     });
 }
 
-async function snapshot(db) {
+async function snapshot(db, { includeRounds = true } = {}) {
     const collect = async () => {
         const tables = {};
         const names = ['users', 'venues', 'criteria', 'teams', 'juries', 'assignments', 'evaluations', 'evaluation_scores', 'audit_logs'];
+        if (includeRounds) names.push('event_rounds');
         if (db.batch) {
             const results = await db.batch(names.map(table => `SELECT * FROM ${table} ORDER BY id`));
             names.forEach((table, i) => { tables[table] = results[i].rows.map(row => ({ ...row })); });
@@ -96,8 +112,7 @@ async function snapshot(db) {
 }
 
 function hostedDatabase() {
-    const url = process.env.TURSO_DATABASE_URL, authToken = process.env.TURSO_AUTH_TOKEN;
-    if (!url || !authToken || !/^(libsql|https):\/\//.test(url)) throw new Error('Hosted deployment requires TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.');
+    const { url, authToken } = databaseSettings();
     const { createClient } = require('@libsql/client/web');
     return cloudAdapter(createClient({ url, authToken }));
 }

@@ -1,9 +1,46 @@
 document.addEventListener('DOMContentLoaded', async () => {
     const { api, send, escape: esc, notice, busy } = Portal;
     const cache = {}, sectionNames = ['dashboard', 'teams', 'juries', 'venues', 'criteria', 'leaderboard', 'audit'];
-    let current = 'dashboard', loadVersion = 0;
+    let current = 'dashboard', loadVersion = 0, readOnly = false, roundState, venuesCache;
+    const roundSelect = document.getElementById('round-select'), startRoundButton = document.getElementById('start-round-btn');
     const badge = status => `<span class="badge ${['Completed', 'submitted'].includes(status) ? 'badge-completed' : ['draft', 'Partially Evaluated'].includes(status) ? 'badge-partial' : 'badge-pending'}">${esc(status)}</span>`;
-    const actions = (type, id) => `<button class="btn-secondary" data-edit="${type}" data-id="${id}">Edit</button> <button class="btn-danger" data-delete="${type}" data-id="${id}">Delete</button>`;
+    const actions = (type, id) => readOnly ? 'Archived' : `<button class="btn-secondary" data-edit="${type}" data-id="${id}">Edit</button> <button class="btn-danger" data-delete="${type}" data-id="${id}">Delete</button>`;
+    function selectRound(id) {
+        const round = roundState.rounds.find(r => r.id === Number(id));
+        if (!round) return;
+        readOnly = Boolean(round.archived_at); roundSelect.value = String(round.id);
+        Portal.selectRound(round.id, readOnly);
+        document.getElementById('round-status').textContent = readOnly ? `${round.name} is archived. Its teams, scores and reports are read-only.` : `${round.name} is active. Start a new round to preserve these results and begin with blank scores.`;
+        document.querySelectorAll('[data-open-modal]').forEach(button => { button.hidden = readOnly; });
+        document.getElementById('master-reset-btn').hidden = readOnly; startRoundButton.disabled = readOnly;
+        document.querySelector('a[href^="/api/reports/detailed-results"]').href = `/api/reports/detailed-results?round=${round.id}`;
+        for (const key of Object.keys(cache)) delete cache[key];
+        venuesCache = undefined;
+    }
+    async function refreshRounds() {
+        roundState = await api('/api/rounds'); Portal.setRound(roundState.active);
+        roundSelect.innerHTML = roundState.rounds.map(r => `<option value="${r.id}">${esc(r.name)}${r.archived_at ? ' · Archived' : ' · Active'}</option>`).join('');
+        selectRound(roundState.active.id);
+    }
+    roundSelect.addEventListener('change', () => { selectRound(roundSelect.value); load().catch(e => notice(e.message, true)); });
+    startRoundButton.addEventListener('click', () => {
+        if (readOnly) return;
+        const dialog = document.createElement('dialog'); dialog.className = 'account-dialog';
+        dialog.innerHTML = `<h2>Start a new judging round</h2><p>${esc(roundState.active.name)} will be archived with its scores and reports. Judges will score the new round.</p>
+            <form><div class="form-group"><label for="new-round-name">Round name</label><input id="new-round-name" maxlength="80" value="Round ${roundState.rounds.length + 1}" required></div>
+            <label class="assignment-row"><input type="checkbox" id="carry-round-teams" checked> Keep teams and jury assignments</label>
+            <p>Venues, scoring criteria and jury accounts are kept. Scores start blank. Uncheck the option to import a new team roster.</p>
+            <button class="btn-primary" type="submit">Start round</button> <button class="btn-secondary" type="button" data-cancel>Cancel</button></form>`;
+        document.body.appendChild(dialog); dialog.showModal();
+        const close = () => { dialog.close(); dialog.remove(); };
+        dialog.querySelector('[data-cancel]').addEventListener('click', close); dialog.addEventListener('cancel', () => dialog.remove());
+        dialog.querySelector('form').addEventListener('submit', event => {
+            event.preventDefault(); busy(dialog.querySelector('[type=submit]'), async () => {
+                const result = await send('/api/rounds', { name: dialog.querySelector('#new-round-name').value, keep_teams: dialog.querySelector('#carry-round-teams').checked });
+                Portal.setRound(result.round); close(); notice(result.message); await refreshRounds(); navigate('dashboard');
+            });
+        });
+    });
     function modal(id, open = true) {
         const element = document.getElementById(id); element.classList.toggle('active', open);
         element.setAttribute('role', 'dialog'); element.setAttribute('aria-modal', 'true');
@@ -11,15 +48,21 @@ document.addEventListener('DOMContentLoaded', async () => {
         else element.querySelector('input:not([type=hidden]), select, button')?.focus();
     }
     async function dropdowns() {
-        const venues = await api('/api/venues');
+        const venues = venuesCache || await api('/api/venues'); venuesCache = venues;
         const html = '<option value="">Choose venue</option>' + venues.map(v => `<option value="${v.id}">${esc(v.name)}</option>`).join('');
         for (const id of ['team-venue-select', 'jury-venue-select']) { const select = document.getElementById(id), selected = select.value; select.innerHTML = html; select.value = selected; }
     }
     async function load(section = current) {
         const version = ++loadVersion;
         const endpoint = section === 'audit' ? 'audit-logs' : section;
-        const items = await api(`/api/${endpoint}`); if (version !== loadVersion) return;
+        const target = document.getElementById(section);
+        target.setAttribute('aria-busy', 'true');
+        if (section !== 'dashboard') document.getElementById(`${section}-table-body`).innerHTML = '<tr><td colspan="8" class="page-loading">Loading…</td></tr>';
+        let items;
+        try { items = await api(`/api/${endpoint}`); } finally { if (version === loadVersion) target.setAttribute('aria-busy', 'false'); }
+        if (version !== loadVersion) return;
         cache[section] = items;
+        if (section === 'venues' && !readOnly) venuesCache = items;
         if (section === 'dashboard') {
             for (const [field, id] of [['totalTeams', 'total-teams'], ['completedTeams', 'completed-teams'], ['pendingTeams', 'pending-teams'], ['activeJuries', 'active-juries'], ['totalVenues', 'total-venues']]) document.getElementById(`stat-${id}`).textContent = items[field];
             document.getElementById('progress-text').textContent = `${items.completedEvaluations} / ${items.totalEvaluationsNeeded} evaluations completed`;
@@ -29,7 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             venues: v => `<td>${esc(v.name)}</td><td>${v.capacity}</td><td>${v.team_count}</td><td>${v.jury_count}</td><td>${actions('venues', v.id)}</td>`,
             criteria: c => `<td>${c.display_order}</td><td>${esc(c.name)}</td><td>${c.max_marks}</td><td>Active</td><td>${actions('criteria', c.id)}</td>`,
             teams: t => `<td>${esc(t.team_number)}</td><td>${esc(t.team_name)}</td><td>${esc(t.venue_name)}</td><td>${t.juries_count}</td><td>${t.evaluations_list.map(e => `${esc(e.jury_name)}: ${e.status === 'submitted' ? e.total_score : 'Draft'}`).join('<br>') || '—'}</td><td>${badge(t.status)}</td><td>${esc(t.final_score)}</td><td><button class="btn-secondary" data-view="${t.id}">View</button> ${actions('teams', t.id)}</td>`,
-            juries: j => `<td>${esc(j.name)}</td><td>${esc(j.username)}</td><td>${esc(j.venue_name)}</td><td>${j.assigned_teams}</td><td>${j.completed_evaluations}</td><td>${j.active ? 'Active' : 'Inactive'}</td><td><button class="btn-secondary" data-assign="${j.id}">Assign Teams</button> ${actions('juries', j.id)}</td>`,
+            juries: j => `<td>${esc(j.name)}</td><td>${esc(j.username)}</td><td>${esc(j.venue_name)}</td><td>${j.assigned_teams}</td><td>${j.completed_evaluations}</td><td>${j.active ? 'Active' : 'Inactive'}</td><td>${readOnly ? 'Archived' : `<button class="btn-secondary" data-assign="${j.id}">Assign Teams</button> ${actions('juries', j.id)}`}</td>`,
             leaderboard: t => `<td>${t.rank}</td><td>${esc(t.team_name)}</td><td>${esc(t.venue_name)}</td><td>${t.final_score} / ${t.max_score}</td><td>${badge(t.status)}</td>`,
             audit: l => `<td>${esc(new Date(l.created_at.includes('T') ? l.created_at : l.created_at.replace(' ', 'T') + 'Z').toLocaleString())}</td><td>${esc(l.user_name)}</td><td>${esc(l.action)}</td><td>${esc(l.entity_type)} ${l.entity_id || ''}</td><td>${esc(l.details)}</td>`
         };
@@ -44,6 +87,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('[data-target]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); navigate(a.dataset.target); }));
     document.querySelectorAll('[data-open-modal]').forEach(button => button.addEventListener('click', () => busy(button, async () => {
         const id = button.dataset.openModal;
+        if (readOnly) throw new Error('Earlier rounds are read-only.');
         const form = document.querySelector(`#${id} form`); form?.reset(); if (form?.elements.id) form.elements.id.value = '';
         if (id === 'team-modal' || id === 'jury-modal') await dropdowns();
         if (id === 'jury-modal') { form.elements.password.required = true; form.elements.password.placeholder = 'At least 10 characters'; }
@@ -58,6 +102,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         form.addEventListener('submit', e => { e.preventDefault(); busy(form.querySelector('[type=submit]'), async () => {
             const data = Object.fromEntries(new FormData(form)), id = data.id;
             const result = await send(`/api/${type}${id ? '/' + id : ''}`, data, id ? 'PUT' : 'POST');
+            if (type === 'venues') venuesCache = undefined;
             modal(modalId, false); notice(result.message); await load();
         }); });
     }
@@ -66,7 +111,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const data = await api('/api/teams/import', { method: 'POST', body: new FormData(importForm) }); modal('team-import-modal', false); notice(data.message); await load('teams');
     }); });
     document.getElementById('master-reset-btn').addEventListener('click', e => busy(e.currentTarget, async () => {
-        const confirmation = prompt('Reset removes all event teams, juries, criteria, assignments and scores. A database backup and audit history will be retained. Type RESET EVENT to continue.');
+        const confirmation = prompt('For the next judging round, cancel and use Start new round. Reset removes the current event setup and jury accounts; archived rounds and a backup remain. Type RESET EVENT to continue.');
         if (confirmation !== 'RESET EVENT') return;
         const result = await send('/api/master-reset', { confirmation }); alert(result.message); location.href = '/';
     }));
@@ -101,13 +146,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('td-title').textContent = `${team.team_number} — ${team.team_name}`;
         document.getElementById('td-content').innerHTML = `<p>Venue: ${esc(team.venue_name)}</p><p>Status: ${esc(team.status)}</p>` + assignments.map(a => {
             const e = evaluations.find(e => e.jury_id === a.jury_id);
-            return `<div class="eval-card"><strong>${esc(a.jury_name)}</strong><p>${e ? `${e.total_score} / ${team.max_score} · ${badge(e.status)}` : 'Not started'}</p>${e?.status === 'submitted' ? `<button class="btn-secondary" data-unlock="${e.id}" data-team="${id}">Unlock</button>` : ''}</div>`;
+            return `<div class="eval-card"><strong>${esc(a.jury_name)}</strong><p>${e ? `${e.total_score} / ${team.max_score} · ${badge(e.status)}` : 'Not started'}</p>${!readOnly && e?.status === 'submitted' ? `<button class="btn-secondary" data-unlock="${e.id}" data-team="${id}">Unlock</button>` : ''}</div>`;
         }).join('') + `<h3>Final average: ${esc(team.final_score)} / ${team.max_score}</h3>`;
         modal('team-details-modal');
     }
     document.addEventListener('click', e => {
         const button = e.target.closest('[data-edit], [data-delete], [data-view], [data-unlock], [data-assign]'); if (!button) return;
         busy(button, async () => {
+            if (readOnly && !button.dataset.view) throw new Error('Earlier rounds are read-only. Switch to the active round.');
             if (button.dataset.edit) {
                 const type = button.dataset.edit, item = cache[type]?.find(i => i.id === Number(button.dataset.id)); if (!item) return;
                 const ids = { venues: 'venue', criteria: 'criterion', teams: 'team', juries: 'jury' }, prefix = ids[type];
@@ -119,6 +165,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else if (button.dataset.delete) {
                 if (!confirm(`Delete this ${button.dataset.delete === 'teams' ? 'team and all its scores' : 'record'}?`)) return;
                 const data = await api(`/api/${button.dataset.delete}/${button.dataset.id}`, { method: 'DELETE' }); notice(data.message); await load();
+                if (button.dataset.delete === 'venues') venuesCache = undefined;
             } else if (button.dataset.view) await viewTeam(Number(button.dataset.view));
             else if (button.dataset.assign) await assignments(Number(button.dataset.assign));
             else if (button.dataset.unlock) {
@@ -127,7 +174,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         });
     });
-    try { await Portal.user('admin'); await load(); }
+    try { await Portal.user('admin'); await refreshRounds(); await load(); }
     catch (e) { notice(e.message, true); }
-    setInterval(() => { if (current === 'dashboard' && !document.hidden) load().catch(e => notice(e.message, true)); }, 10000);
+    setInterval(() => { if (current === 'dashboard' && !readOnly && !document.hidden) load().catch(e => notice(e.message, true)); }, 10000);
 });

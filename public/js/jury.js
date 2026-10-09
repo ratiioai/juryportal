@@ -10,8 +10,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.querySelectorAll('[data-target]').forEach(a => a.classList.toggle('active', a.dataset.target === section));
     }
     function canLeave() { return !dirty || confirm('You have unsaved scores. Leave without saving?'); }
-    async function dashboard() {
-        const data = await api('/api/jury/dashboard');
+    function renderDashboard(data) {
         document.getElementById('jury-venue-badge').textContent = `Venue: ${data.venue_name}`;
         document.getElementById('stat-total-teams').textContent = data.totalTeams;
         document.getElementById('stat-completed-teams').textContent = data.completedTeams;
@@ -19,8 +18,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('progress-text').textContent = `${data.progress}% Completed`;
         document.getElementById('progress-bar').style.width = `${data.progress}%`;
     }
+    async function dashboard() { await loadTeams(); }
     async function loadTeams() {
-        [teams, criteria] = await Promise.all([api('/api/jury/teams'), api('/api/criteria')]);
+        grid.setAttribute('aria-busy', 'true'); grid.innerHTML = '<p class="page-loading">Loading assigned teams…</p>';
+        let workspace;
+        try { workspace = await api('/api/jury/workspace'); } finally { grid.setAttribute('aria-busy', 'false'); }
+        teams = workspace.teams; criteria = workspace.criteria; Portal.setRound(workspace.round);
+        document.getElementById('jury-round-label').textContent = `Judging: ${workspace.round.name}`;
+        renderDashboard(workspace.dashboard);
         grid.innerHTML = teams.map(t => `<div class="team-card"><h3>${esc(t.team_number)}</h3><div class="team-name">${esc(t.team_name)}</div><div class="venue-name">${esc(t.venue_name)}</div>
             <div class="status-row">${esc(t.eval_status)}${t.eval_status === 'draft' ? ` · ${t.scored_count}/${criteria.length} criteria scored` : ''}${t.eval_status === 'submitted' ? ` · Score: ${t.total_score}` : ''}</div>
             <div class="team-card-actions"><button class="btn-primary" data-team="${t.id}">${t.eval_status === 'submitted' ? 'View Evaluation' : t.eval_status === 'draft' ? 'Continue Draft' : 'Evaluate'}</button></div></div>`).join('') || '<p>No teams assigned yet. Ask the admin to assign teams to your account.</p>';
@@ -32,6 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         loading = true; draftButton.disabled = true; submitButton.disabled = true;
         try {
             const data = await api(`/api/evaluations/${team.id}`);
+            Portal.setRound(data.round); document.getElementById('jury-round-label').textContent = `Judging: ${data.round.name}`;
             currentTeam = team; revision = data.evaluation?.revision || 0; criteria = data.criteria; dirty = false;
             document.getElementById('eval-team-number').textContent = team.team_number;
             document.getElementById('eval-team-name').textContent = team.team_name;
@@ -66,7 +72,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         loading = true; draftButton.disabled = submitButton.disabled = true;
         try {
             const result = await send('/api/evaluations', { team_id: currentTeam.id, action, scores, revision });
-            revision = result.revision; dirty = false; notice(result.message); await loadTeams(); await dashboard(); show('teams');
+            revision = result.revision; dirty = false; notice(result.message); show('teams'); await loadTeams();
         } catch (e) { notice(e.message, true); }
         finally { loading = false; draftButton.disabled = submitButton.disabled = false; }
     }
@@ -75,13 +81,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     grid.addEventListener('click', e => { const button = e.target.closest('[data-team]'); if (button) busy(button, () => openEvaluation(teams.find(t => t.id === Number(button.dataset.team)))); });
     document.querySelectorAll('[data-target]').forEach(a => a.addEventListener('click', async e => {
         e.preventDefault(); if (loading || !canLeave()) return; dirty = false;
-        try { if (a.dataset.target === 'teams') await loadTeams(); else await dashboard(); show(a.dataset.target); } catch (e) { notice(e.message, true); }
+        show(a.dataset.target);
+        try { await loadTeams(); } catch (e) { notice(e.message, true); }
     }));
     document.getElementById('back-to-teams').addEventListener('click', () => document.querySelector('[data-target="teams"]').click());
     submitAllButton.addEventListener('click', e => busy(e.currentTarget, async () => {
         if (!confirm('Submit and lock every completed draft? Only an admin can unlock submitted scores.')) return;
-        const result = await send('/api/jury/submit-all', {}); notice(result.message); await dashboard(); await loadTeams();
-    }).then(() => loadTeams().catch(e => notice(e.message, true))));
+        const result = await send('/api/jury/submit-all', {}); notice(result.message); await loadTeams();
+    }));
     document.getElementById('logout-btn').addEventListener('click', async e => {
         e.preventDefault(); if (loading || !canLeave()) return;
         try { await api('/api/logout', { method: 'POST' }); dirty = false; location.href = '/'; } catch (e) { notice(e.message, true); }

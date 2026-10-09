@@ -83,3 +83,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     details TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS event_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archived_at TEXT,
+    snapshot_json TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_round ON event_rounds ((1)) WHERE archived_at IS NULL;
+INSERT INTO event_rounds (name) SELECT 'Round 1' WHERE NOT EXISTS (SELECT 1 FROM event_rounds WHERE archived_at IS NULL);

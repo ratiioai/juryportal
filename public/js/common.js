@@ -6,16 +6,30 @@ const Portal = (() => {
         });
     });
     const nativeFetch = window.fetch.bind(window);
+    let roundId = null, selectedRound = null, roundIsArchived = false, staleRound = false;
+    const setRound = round => { roundId = round.id; staleRound = false; };
+    const selectRound = (id, archived = false) => { selectedRound = id; roundIsArchived = archived; };
     // Every state-changing request carries a header that cross-site forms cannot send.
     window.fetch = (url, options = {}) => nativeFetch(url, { ...options,
         headers: { ...options.headers, 'X-Requested-With': 'JuryPortal' }, credentials: 'same-origin' });
     const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     async function api(url, options = {}) {
+        const scoped = /^\/api\/(dashboard|teams(?:\/|$)|juries(?:\/|$)|venues(?:\/|$)|criteria(?:\/|$)|leaderboard|audit-logs|reports\/)/.test(url);
+        const writes = options.method && !['GET', 'HEAD'].includes(options.method);
+        if (writes && !['/api/login', '/api/logout', '/api/password'].includes(url)) {
+            if (staleRound) throw new Error('The judging round changed. Refresh the portal before saving.');
+            if (roundIsArchived) throw new Error('Earlier rounds are read-only. Switch to the active round.');
+            options = { ...options, headers: { ...options.headers, ...(roundId ? { 'X-Portal-Round': String(roundId) } : {}) } };
+        }
+        if (scoped && selectedRound) url += `${url.includes('?') ? '&' : '?'}round=${selectedRound}`;
         let response;
         try { response = await fetch(url, options); } catch { throw new Error('Cannot reach the server. Check the Wi-Fi connection, then retry.'); }
         const data = await response.json().catch(() => ({ error: 'The server returned an unexpected response.' }));
         if (response.status === 401 && !['/api/login', '/api/password'].includes(url)) { location.href = '/'; throw new Error('Please log in again.'); }
-        if (!response.ok) throw new Error(data.error || 'Request failed.');
+        if (!response.ok) {
+            if (data.code === 'ROUND_CHANGED') staleRound = true;
+            throw Object.assign(new Error(data.error || 'Request failed.'), { code: data.code });
+        }
         return data;
     }
     const send = (url, body, method = 'POST') => api(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -58,11 +72,12 @@ const Portal = (() => {
     }
     async function user(role) {
         const current = await api('/api/me');
+        if (current.round) setRound(current.round);
         if (current.role !== role) { location.href = current.role === 'admin' ? '/admin.html' : '/jury.html'; throw new Error('Opening your portal.'); }
         if (current.must_change_password) await passwordDialog(true);
         const nav = document.querySelector('.nav-links');
         if (nav) { const li = document.createElement('li'), button = document.createElement('button'); button.className = 'btn-secondary account-button'; button.textContent = 'Change password'; li.appendChild(button); nav.appendChild(li); button.addEventListener('click', () => passwordDialog()); }
         return current;
     }
-    return { api, send, escape, notice, busy, user };
+    return { api, send, escape, notice, busy, user, setRound, selectRound };
 })();

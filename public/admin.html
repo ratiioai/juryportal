@@ -29,11 +29,16 @@
 
         <main class="main-content">
             <div class="workspace-heading">Hackathon Evaluation System <span>Organizer workspace</span></div>
+            <div class="round-controls">
+                <div><label for="round-select">Judging round</label><select id="round-select" aria-describedby="round-status"><option>Loading rounds…</option></select></div>
+                <button class="btn-primary" id="start-round-btn" type="button" disabled>Start new round</button>
+                <p id="round-status" role="status">Loading round history…</p>
+            </div>
             <!-- Dashboard Section -->
             <section id="dashboard" class="page-section active">
                 <div class="header-flex">
                     <h2>Dashboard</h2>
-                    <button class="btn-danger" id="master-reset-btn">Master Reset</button>
+                    <button class="btn-danger" id="master-reset-btn">Reset event setup</button>
                 </div>
                 
                 <div class="dashboard-grid">

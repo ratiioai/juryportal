@@ -20,10 +20,14 @@ const {
 } = require('./database/database');
 const SQLiteSessionStore = require('./database/session-store');
 const { localAdapter, snapshot } = require('./database/adapter');
+const { readEvent, teamResults: resultViews, venueResults, juryResults, archiveRound } = require('./database/event-data');
 function fail(message, status = 400) {
   const error = new Error(message);
   error.status = status;
   throw error;
+}
+function roundChanged() {
+  throw Object.assign(new Error('The judging round changed. Refresh the portal before saving.'), { status: 409, code: 'ROUND_CHANGED' });
 }
 function text(value, label, max = 200) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > max) fail(`${label} is required (maximum ${max} characters).`);
@@ -71,6 +75,14 @@ function createApp({
   if (!db.hosted) db = localAdapter(db);
   let resetting = false;
   app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    const started = performance.now(), writeHead = res.writeHead;
+    res.writeHead = function (...args) {
+      res.setHeader('Server-Timing', `app;dur=${(performance.now() - started).toFixed(1)}`);
+      return writeHead.apply(this, args);
+    };
+    next();
+  });
   if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
   app.use(helmet({
     contentSecurityPolicy: {
@@ -97,7 +109,7 @@ function createApp({
     store: new SQLiteSessionStore(db),
     resave: false,
     saveUninitialized: false,
-    rolling: true,
+    rolling: false,
     cookie: {
       httpOnly: true,
       sameSite: 'strict',
@@ -124,7 +136,8 @@ function createApp({
   const audit = async (req, action, entity, id, details) => await db.prepare('INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)').run(req.user.id, action, entity, id || null, details);
   const auth = role => async (req, res, next) => {
     const saved = req.session.user;
-    const user = saved && (await db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(saved.id));
+    const user = saved && (await db.prepare(`SELECT u.*, r.id AS round_id, r.name AS round_name
+      FROM users u JOIN event_rounds r ON r.archived_at IS NULL WHERE u.id = ? AND u.active = 1`).get(saved.id));
     if (!user || user.session_version !== saved.session_version) return res.status(401).json({
       error: 'Please log in again.'
     });
@@ -132,9 +145,23 @@ function createApp({
       error: 'You do not have permission for this action.'
     });
     req.user = user;
+    req.activeRound = { id: user.round_id, name: user.round_name };
+    req.expectedRound = req.get('X-Portal-Round') || saved.round_id || user.round_id;
+    res.set('X-Portal-Round', String(user.round_id));
     if (user.must_change_password && !['/api/me', '/api/password'].includes(req.path)) return res.status(403).json({
       error: 'Change your initial password before continuing.'
     });
+    if (req.query.round && number(req.query.round, 'Round ID') !== user.round_id) {
+      if (user.role !== 'admin') fail('Only administrators can view earlier rounds.', 403);
+      if (req.method !== 'GET') fail('Earlier rounds are read-only. Switch to the active round.', 409);
+      const round = await db.prepare('SELECT * FROM event_rounds WHERE id = ?').get(number(req.query.round, 'Round ID'));
+      if (!round?.snapshot_json) fail('Round not found.', 404);
+      if (!/^\/api\/(dashboard|teams(?:\/\d+)?|venues|criteria|juries|leaderboard|audit-logs|reports\/detailed-results)$/.test(req.path)) fail('This view is not available for archived rounds.', 409);
+      req.roundSnapshot = JSON.parse(round.snapshot_json);
+      req.selectedRound = { id: round.id, name: round.name, archived_at: round.archived_at };
+    }
+    if (!['GET', 'HEAD'].includes(req.method) && req.path !== '/api/password' && (!req.get('X-Portal-Round') || Number(req.expectedRound) !== user.round_id)) roundChanged();
+    if (req.method === 'GET' && saved.round_id !== user.round_id) req.session.user.round_id = user.round_id;
     next();
   };
   const admin = auth('admin'),
@@ -145,6 +172,10 @@ function createApp({
     return row;
   };
   const rubric = async () => await db.prepare('SELECT * FROM criteria WHERE active = 1 ORDER BY display_order, id').all();
+  const assertRound = async req => {
+    const round = await db.prepare('SELECT id FROM event_rounds WHERE archived_at IS NULL').get();
+    if (round.id !== Number(req.expectedRound)) roundChanged();
+  };
   const rubricUnlocked = async () => {
     if (await db.prepare('SELECT id FROM evaluations LIMIT 1').get()) fail('Scoring has begun. Criteria cannot change during this event.', 409);
   };
@@ -183,42 +214,7 @@ function createApp({
       total: Math.round((total + Number.EPSILON) * 1000000) / 1000000
     };
   };
-  const teamResults = async () => {
-    return (db.readTransaction || db.transaction)(async () => {
-    const teams = await db.prepare('SELECT t.*, v.name AS venue_name FROM teams t LEFT JOIN venues v ON v.id = t.venue_id ORDER BY t.id').all();
-    const assignments = await db.prepare('SELECT a.*, u.name AS jury_name FROM assignments a JOIN users u ON u.id = a.jury_id ORDER BY u.id').all();
-    const evaluations = await db.prepare('SELECT e.*, u.name AS jury_name FROM evaluations e JOIN users u ON u.id = e.jury_id').all();
-    const maximum = (await rubric()).reduce((sum, c) => sum + c.max_marks, 0);
-    const assignmentsByTeam = new Map(),
-      evaluationsByTeam = new Map();
-    for (const a of assignments) {
-      if (!assignmentsByTeam.has(a.team_id)) assignmentsByTeam.set(a.team_id, []);
-      assignmentsByTeam.get(a.team_id).push(a);
-    }
-    for (const e of evaluations) {
-      if (!evaluationsByTeam.has(e.team_id)) evaluationsByTeam.set(e.team_id, []);
-      evaluationsByTeam.get(e.team_id).push(e);
-    }
-    return teams.map(team => {
-      const assigned = assignmentsByTeam.get(team.id) || [];
-      const juryIds = new Set(assigned.map(a => a.jury_id));
-      const evals = (evaluationsByTeam.get(team.id) || []).filter(e => juryIds.has(e.jury_id));
-      const submitted = evals.filter(e => e.status === 'submitted');
-      const complete = assigned.length > 0 && submitted.length === assigned.length;
-      return {
-        ...team,
-        assignments: assigned,
-        evaluations_list: evals,
-        juries_count: assigned.length,
-        submitted_count: submitted.length,
-        max_score: maximum,
-        status: !assigned.length ? 'No Jury Assigned' : complete ? 'Completed' : submitted.length ? 'Partially Evaluated' : 'Pending',
-        final_score: complete ? (submitted.reduce((sum, e) => sum + e.total_score, 0) / assigned.length).toFixed(2) : '-',
-        average: complete ? submitted.reduce((sum, e) => sum + e.total_score, 0) / assigned.length : null
-      };
-    });
-    });
-  };
+  const teamResults = async req => resultViews(await readEvent(db, req));
   const leaderboard = async (teams) => {
     const board = (teams || await teamResults()).filter(t => t.average !== null).sort((a, b) => b.average - a.average || a.id - b.id);
     let rank = 1;
@@ -242,17 +238,18 @@ function createApp({
   }), async (req, res) => {
     const username = text(req.body.username, 'Username', 80);
     if (typeof req.body.password !== 'string' || Buffer.byteLength(req.body.password) > 72) fail('Invalid username or password.', 401);
-    const user = await db.prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE AND active = 1').get(username);
+    const user = await db.prepare(`SELECT u.*, r.id AS round_id FROM users u JOIN event_rounds r ON r.archived_at IS NULL WHERE u.username = ? COLLATE NOCASE AND u.active = 1`).get(username);
     const valid = await bcrypt.compare(req.body.password, user ? user.password_hash : bcrypt.hashSync('unusable-password', 10));
     if (!user || !valid) fail('Invalid username or password.', 401);
     await new Promise((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
     req.session.user = {
       id: user.id,
-      session_version: user.session_version
+      session_version: user.session_version, round_id: user.round_id
     };
     await new Promise((resolve, reject) => req.session.save(error => error ? reject(error) : resolve()));
     req.user = user;
     await audit(req, 'LOGIN', 'user', user.id, 'Successful login');
+    res.set('X-Portal-Round', String(user.round_id));
     res.json({
       message: 'Login successful',
       role: user.role
@@ -270,7 +267,7 @@ function createApp({
     username: req.user.username,
     name: req.user.name,
     role: req.user.role,
-    must_change_password: Boolean(req.user.must_change_password)
+    must_change_password: Boolean(req.user.must_change_password), round: req.activeRound
   }));
   app.post('/api/password', auth(), async (req, res) => {
     if (typeof req.body.current_password !== 'string' || !(await bcrypt.compare(req.body.current_password, req.user.password_hash))) fail('Current password is incorrect.', 401);
@@ -289,21 +286,43 @@ function createApp({
       status: 'ok'
     });
   });
+  app.get('/api/rounds', auth(), async (req, res) => {
+    const rounds = req.user.role === 'admin' ? await db.prepare('SELECT id, name, started_at, archived_at FROM event_rounds ORDER BY id DESC').all() : [req.activeRound];
+    res.json({ active: req.activeRound, rounds });
+  });
+  app.post('/api/rounds', admin, async (req, res) => {
+    const name = text(req.body.name, 'Round name', 80);
+    const keepTeams = req.body.keep_teams !== false;
+    if (req.body.keep_teams !== undefined && typeof req.body.keep_teams !== 'boolean') fail('Choose whether to carry teams into the next round.');
+    let id;
+    await db.transaction(async () => {
+      await assertRound(req);
+      await archiveRound(db, req.activeRound);
+      const statements = ['DELETE FROM evaluation_scores', 'DELETE FROM evaluations'];
+      if (!keepTeams) statements.push('DELETE FROM assignments', 'DELETE FROM teams');
+      await db.batch(statements);
+      id = (await db.prepare('INSERT INTO event_rounds (name) VALUES (?)').run(name)).lastInsertRowid;
+      await audit(req, 'START_ROUND', 'round', id, `Archived ${req.activeRound.name}; started ${name}; ${keepTeams ? 'carried teams and assignments' : 'empty team roster'}`);
+    });
+    req.session.user.round_id = id;
+    res.set('X-Portal-Round', String(id));
+    res.json({ message: `${name} started. ${req.activeRound.name} remains available in round history.`, round: { id, name } });
+  });
   app.get('/api/dashboard', admin, async (req, res) => {
-    const teams = await teamResults();
+    const tables = await readEvent(db, req), teams = resultViews(tables);
     const assignments = teams.reduce((s, t) => s + t.juries_count, 0);
     const completed = teams.reduce((s, t) => s + t.submitted_count, 0);
     res.json({
       totalTeams: teams.length,
       completedTeams: teams.filter(t => t.status === 'Completed').length,
       pendingTeams: teams.filter(t => t.status !== 'Completed').length,
-      activeJuries: (await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'jury' AND active = 1").get()).n,
-      totalVenues: (await db.prepare('SELECT COUNT(*) AS n FROM venues').get()).n,
+      activeJuries: tables.users.filter(u => u.role === 'jury' && u.active).length,
+      totalVenues: tables.venues.length,
       totalEvaluationsNeeded: assignments,
-      completedEvaluations: completed
+      completedEvaluations: completed, round: req.selectedRound || req.activeRound
     });
   });
-  app.get('/api/venues', admin, async (req, res) => res.json(await db.prepare(`SELECT v.*,
+  app.get('/api/venues', admin, async (req, res) => res.json(req.roundSnapshot ? venueResults(req.roundSnapshot.tables) : await db.prepare(`SELECT v.*,
         (SELECT COUNT(*) FROM teams WHERE venue_id = v.id) AS team_count,
         (SELECT COUNT(*) FROM juries WHERE venue_id = v.id) AS jury_count FROM venues v ORDER BY v.id`).all()));
   for (const method of ['post', 'put']) app[method]('/api/venues' + (method === 'put' ? '/:id' : ''), admin, async (req, res) => {
@@ -311,6 +330,7 @@ function createApp({
       capacity = number(req.body.capacity, 'Capacity');
     let id = method === 'put' ? (await get('venues', req.params.id)).id : null;
     await db.transaction(async () => {
+      await assertRound(req);
       if (id) await db.prepare('UPDATE venues SET name = ?, capacity = ? WHERE id = ?').run(name, capacity, id);else id = (await db.prepare('INSERT INTO venues (name, capacity) VALUES (?, ?)').run(name, capacity)).lastInsertRowid;
       await audit(req, method === 'put' ? 'UPDATE_VENUE' : 'CREATE_VENUE', 'venue', id, name);
     });
@@ -323,6 +343,7 @@ function createApp({
     const venue = await get('venues', req.params.id);
     if (await db.prepare('SELECT id FROM teams WHERE venue_id = ? UNION ALL SELECT id FROM juries WHERE venue_id = ? LIMIT 1').get(venue.id, venue.id)) fail('Move or remove this venue’s teams and juries first.', 409);
     await db.transaction(async () => {
+      await assertRound(req);
       if (await db.prepare('SELECT id FROM teams WHERE venue_id = ? UNION ALL SELECT id FROM juries WHERE venue_id = ? LIMIT 1').get(venue.id, venue.id)) fail('Move or remove this venue’s teams and juries first.', 409);
       await db.prepare('DELETE FROM venues WHERE id = ?').run(venue.id);
       await audit(req, 'DELETE_VENUE', 'venue', venue.id, venue.name);
@@ -331,7 +352,7 @@ function createApp({
       message: 'Venue deleted'
     });
   });
-  app.get('/api/criteria', auth(), async (req, res) => res.json(await rubric()));
+  app.get('/api/criteria', auth(), async (req, res) => res.json(req.roundSnapshot ? req.roundSnapshot.tables.criteria.filter(c => c.active) : await rubric()));
   for (const method of ['post', 'put']) app[method]('/api/criteria' + (method === 'put' ? '/:id' : ''), admin, async (req, res) => {
     await rubricUnlocked();
     const name = text(req.body.name, 'Criterion name'),
@@ -339,6 +360,7 @@ function createApp({
     const order = number(req.body.display_order, 'Display order', 0, 10000);
     let id = method === 'put' ? (await get('criteria', req.params.id)).id : null;
     await db.transaction(async () => {
+      await assertRound(req);
       await rubricUnlocked();
       if (id) await db.prepare('UPDATE criteria SET name = ?, max_marks = ?, display_order = ? WHERE id = ?').run(name, max, order, id);else id = (await db.prepare('INSERT INTO criteria (name, max_marks, display_order) VALUES (?, ?, ?)').run(name, max, order)).lastInsertRowid;
       await audit(req, method === 'put' ? 'UPDATE_CRITERION' : 'CREATE_CRITERION', 'criterion', id, name);
@@ -352,6 +374,7 @@ function createApp({
     await rubricUnlocked();
     const c = await get('criteria', req.params.id);
     await db.transaction(async () => {
+      await assertRound(req);
       await rubricUnlocked();
       await db.prepare('DELETE FROM criteria WHERE id = ?').run(c.id);
       await audit(req, 'DELETE_CRITERION', 'criterion', c.id, c.name);
@@ -360,9 +383,9 @@ function createApp({
       message: 'Criterion deleted'
     });
   });
-  app.get('/api/teams', admin, async (req, res) => res.json(await teamResults()));
+  app.get('/api/teams', admin, async (req, res) => res.json(await teamResults(req)));
   app.get('/api/teams/:id', admin, async (req, res) => {
-    const t = (await teamResults()).find(t => t.id === number(req.params.id, 'Team ID'));
+    const t = (await teamResults(req)).find(t => t.id === number(req.params.id, 'Team ID'));
     if (!t) fail('Team not found.', 404);
     res.json({
       team: t,
@@ -380,6 +403,7 @@ function createApp({
     const t = await teamInput(req.body);
     let id;
     await db.transaction(async () => {
+      await assertRound(req);
       id = (await db.prepare('INSERT INTO teams (team_number, team_name, venue_id) VALUES (?, ?, ?)').run(t.number, t.name, t.venue)).lastInsertRowid;
       await assignTeam(id, t.venue);
       await audit(req, 'CREATE_TEAM', 'team', id, t.number);
@@ -394,6 +418,7 @@ function createApp({
       t = await teamInput(req.body);
     if (old.venue_id !== t.venue && (await db.prepare('SELECT id FROM evaluations WHERE team_id = ? LIMIT 1').get(old.id))) fail('This team already has evaluations. Its venue cannot change during judging.', 409);
     await db.transaction(async () => {
+      await assertRound(req);
       const current = await get('teams', old.id);
       if (current.venue_id !== t.venue && await db.prepare('SELECT id FROM evaluations WHERE team_id = ? LIMIT 1').get(old.id)) fail('This team already has evaluations. Its venue cannot change during judging.', 409);
       await db.prepare('UPDATE teams SET team_number = ?, team_name = ?, venue_id = ? WHERE id = ?').run(t.number, t.name, t.venue, old.id);
@@ -410,6 +435,7 @@ function createApp({
   app.delete('/api/teams/:id', admin, async (req, res) => {
     const t = await get('teams', req.params.id);
     await db.transaction(async () => {
+      await assertRound(req);
       await db.prepare('DELETE FROM evaluation_scores WHERE evaluation_id IN (SELECT id FROM evaluations WHERE team_id = ?)').run(t.id);
       await db.prepare('DELETE FROM evaluations WHERE team_id = ?').run(t.id);
       await db.prepare('DELETE FROM assignments WHERE team_id = ?').run(t.id);
@@ -484,6 +510,7 @@ function createApp({
       error: `Nothing imported. ${errors.slice(0, 15).join('\n')}${errors.length > 15 ? `\n…and ${errors.length - 15} more errors.` : ''}`
     });
     await db.transaction(async () => {
+      await assertRound(req);
       await db.prepare(`INSERT INTO teams (team_number, team_name, venue_id) VALUES ${ready.map(() => '(?, ?, ?)').join(',')}`).run(...ready.flatMap(t => [t.teamNumber, t.teamName, t.venue]));
       await db.prepare(`INSERT OR IGNORE INTO assignments (team_id, jury_id, venue_id)
         SELECT t.id, u.id, t.venue_id FROM teams t JOIN juries j ON j.venue_id = t.venue_id JOIN users u ON u.username = j.username
@@ -504,7 +531,7 @@ function createApp({
       venue_id: j.venue_id
     };
   };
-  app.get('/api/juries', admin, async (req, res) => res.json(await db.prepare(`SELECT u.id, u.name, u.username, u.active, j.venue_id, v.name AS venue_name,
+  app.get('/api/juries', admin, async (req, res) => res.json(req.roundSnapshot ? juryResults(req.roundSnapshot.tables) : await db.prepare(`SELECT u.id, u.name, u.username, u.active, j.venue_id, v.name AS venue_name,
         (SELECT COUNT(*) FROM assignments WHERE jury_id = u.id) AS assigned_teams,
         (SELECT COUNT(*) FROM evaluations e JOIN assignments a ON a.team_id = e.team_id AND a.jury_id = e.jury_id WHERE e.jury_id = u.id AND e.status = 'submitted') AS completed_evaluations
         FROM users u JOIN juries j ON j.username = u.username LEFT JOIN venues v ON v.id = j.venue_id WHERE u.role = 'jury' ORDER BY u.id`).all()));
@@ -522,6 +549,7 @@ function createApp({
     let hash = !old || req.body.password ? await bcrypt.hash(password(req.body.password), 12) : old.password_hash;
     let id = old?.id;
     await db.transaction(async () => {
+      await assertRound(req);
       if (old) {
         old = await getJury(id);
         started = await db.prepare('SELECT id FROM evaluations WHERE jury_id = ? LIMIT 1').get(id);
@@ -551,6 +579,7 @@ function createApp({
     const j = await getJury(req.params.id);
     if (await db.prepare('SELECT id FROM evaluations WHERE jury_id = ? LIMIT 1').get(j.id)) fail('This jury has evaluations and cannot be deleted during judging.', 409);
     await db.transaction(async () => {
+      await assertRound(req);
       if (await db.prepare('SELECT id FROM evaluations WHERE jury_id = ? LIMIT 1').get(j.id)) fail('This jury has evaluations and cannot be deleted during judging.', 409);
       await db.prepare('DELETE FROM assignments WHERE jury_id = ?').run(j.id);
       await db.prepare('DELETE FROM juries WHERE username = ?').run(j.username);
@@ -573,6 +602,7 @@ function createApp({
       t = await get('teams', req.body.team_id);
     if (!j.active) fail('Activate this jury before assigning teams.', 409);
     await db.transaction(async () => {
+      await assertRound(req);
       const current = await getJury(j.id), team = await get('teams', t.id);
       if (!current.active) fail('Activate this jury before assigning teams.', 409);
       await db.prepare('INSERT OR IGNORE INTO assignments (team_id, jury_id, venue_id) VALUES (?, ?, ?)').run(t.id, j.id, team.venue_id);
@@ -587,6 +617,7 @@ function createApp({
       t = await get('teams', req.params.teamId);
     if (await db.prepare('SELECT id FROM evaluations WHERE jury_id = ? AND team_id = ?').get(j.id, t.id)) fail('Scoring has begun for this assignment. It cannot be removed.', 409);
     await db.transaction(async () => {
+      await assertRound(req);
       if (await db.prepare('SELECT id FROM evaluations WHERE jury_id = ? AND team_id = ?').get(j.id, t.id)) fail('Scoring has begun for this assignment. It cannot be removed.', 409);
       await db.prepare('DELETE FROM assignments WHERE jury_id = ? AND team_id = ?').run(j.id, t.id);
       await audit(req, 'REMOVE_ASSIGNMENT', 'team', t.id, `Removed from jury ${j.username}`);
@@ -595,10 +626,22 @@ function createApp({
       message: 'Assignment removed'
     });
   });
-  const juryTeams = async id => await db.prepare(`SELECT t.*, v.name AS venue_name, COALESCE(e.status, 'Pending') AS eval_status, e.total_score, e.revision,
+  const juryTeamsSQL = `SELECT t.*, v.name AS venue_name, COALESCE(e.status, 'Pending') AS eval_status, e.total_score, e.revision,
         (SELECT COUNT(*) FROM evaluation_scores s WHERE s.evaluation_id = e.id) AS scored_count
         FROM assignments a JOIN teams t ON t.id = a.team_id LEFT JOIN venues v ON v.id = t.venue_id
-        LEFT JOIN evaluations e ON e.team_id = t.id AND e.jury_id = a.jury_id WHERE a.jury_id = ? ORDER BY t.id`).all(id);
+        LEFT JOIN evaluations e ON e.team_id = t.id AND e.jury_id = a.jury_id WHERE a.jury_id = ? ORDER BY t.id`;
+  const juryTeams = async id => await db.prepare(juryTeamsSQL).all(id);
+  app.get('/api/jury/workspace', jury, async (req, res) => {
+    const [assigned, criteria, venues, rounds] = await db.batch([
+      { sql: juryTeamsSQL, args: [req.user.id] }, 'SELECT * FROM criteria WHERE active = 1 ORDER BY display_order, id',
+      { sql: 'SELECT v.name FROM juries j JOIN venues v ON v.id = j.venue_id WHERE j.username = ?', args: [req.user.username] },
+      'SELECT id, name FROM event_rounds WHERE archived_at IS NULL'
+    ], 'read');
+    const teams = assigned.rows.map(row => ({ ...row })), complete = teams.filter(t => t.eval_status === 'submitted').length;
+    res.json({ teams, criteria: criteria.rows.map(row => ({ ...row })), round: { ...rounds.rows[0] },
+      dashboard: { venue_name: venues.rows[0]?.name || 'Unassigned', totalTeams: teams.length, completedTeams: complete,
+        pendingTeams: teams.length - complete, progress: teams.length ? (complete / teams.length * 100).toFixed(1) : '0' } });
+  });
   app.get('/api/jury/dashboard', jury, async (req, res) => {
     const teams = await juryTeams(req.user.id),
       complete = teams.filter(t => t.eval_status === 'submitted').length;
@@ -608,18 +651,23 @@ function createApp({
       totalTeams: teams.length,
       completedTeams: complete,
       pendingTeams: teams.length - complete,
-      progress: teams.length ? (complete / teams.length * 100).toFixed(1) : '0'
+      progress: teams.length ? (complete / teams.length * 100).toFixed(1) : '0', round: req.activeRound
     });
   });
   app.get('/api/jury/teams', jury, async (req, res) => res.json(await juryTeams(req.user.id)));
   app.get('/api/evaluations/:teamId', jury, async (req, res) => {
     const teamId = number(req.params.teamId, 'Team ID');
-    await ensureAssigned(teamId, req.user.id);
-    const evaluation = await db.prepare('SELECT * FROM evaluations WHERE team_id = ? AND jury_id = ?').get(teamId, req.user.id);
+    const [assigned, evaluations, scores, criteria, rounds] = await db.batch([
+      { sql: 'SELECT t.id, a.id AS assignment_id FROM teams t LEFT JOIN assignments a ON a.team_id = t.id AND a.jury_id = ? WHERE t.id = ?', args: [req.user.id, teamId] },
+      { sql: 'SELECT * FROM evaluations WHERE team_id = ? AND jury_id = ?', args: [teamId, req.user.id] },
+      { sql: 'SELECT s.* FROM evaluation_scores s JOIN evaluations e ON e.id = s.evaluation_id WHERE e.team_id = ? AND e.jury_id = ?', args: [teamId, req.user.id] },
+      'SELECT * FROM criteria WHERE active = 1 ORDER BY display_order, id', 'SELECT id, name FROM event_rounds WHERE archived_at IS NULL'
+    ], 'read');
+    if (!assigned.rows.length) fail('Record not found.', 404);
+    if (!assigned.rows[0].assignment_id) fail('This team is not assigned to you.', 403);
     res.json({
-      evaluation: evaluation || null,
-      scores: evaluation ? await db.prepare('SELECT * FROM evaluation_scores WHERE evaluation_id = ?').all(evaluation.id) : [],
-      criteria: await rubric()
+      evaluation: evaluations.rows[0] ? { ...evaluations.rows[0] } : null,
+      scores: scores.rows.map(row => ({ ...row })), criteria: criteria.rows.map(row => ({ ...row })), round: { ...rounds.rows[0] }
     });
   });
   app.post('/api/evaluations', jury, async (req, res) => {
@@ -628,22 +676,29 @@ function createApp({
     const revision = number(req.body.revision, 'Revision', 0, Number.MAX_SAFE_INTEGER);
     let nextRevision;
     await db.transaction(async () => {
-      await ensureAssigned(teamId, req.user.id);
-      const validated = await validateScores(req.body.scores, req.body.action === 'submit');
-      const old = await db.prepare('SELECT * FROM evaluations WHERE team_id = ? AND jury_id = ?').get(teamId, req.user.id);
+      const [assigned, evaluations, criteria, rounds] = await db.batch([
+        { sql: 'SELECT t.id, a.id AS assignment_id FROM teams t LEFT JOIN assignments a ON a.team_id = t.id AND a.jury_id = ? WHERE t.id = ?', args: [req.user.id, teamId] },
+        { sql: 'SELECT * FROM evaluations WHERE team_id = ? AND jury_id = ?', args: [teamId, req.user.id] },
+        'SELECT * FROM criteria WHERE active = 1 ORDER BY display_order, id', 'SELECT id FROM event_rounds WHERE archived_at IS NULL'
+      ], 'read');
+      if (rounds.rows[0].id !== Number(req.expectedRound)) roundChanged();
+      if (!assigned.rows.length) fail('Record not found.', 404);
+      if (!assigned.rows[0].assignment_id) fail('This team is not assigned to you.', 403);
+      const validated = await validateScores(req.body.scores, req.body.action === 'submit', criteria.rows);
+      const old = evaluations.rows[0];
       if (old?.status === 'submitted') fail('Evaluation is submitted and locked.', 409);
       if ((old?.revision || 0) !== revision) fail('This evaluation changed in another tab. Reload it before saving.', 409);
       nextRevision = revision + 1;
       const now = new Date().toISOString(),
         status = req.body.action === 'submit' ? 'submitted' : 'draft';
-      let id;
-      if (old) {
-        id = old.id;
-        await db.prepare('UPDATE evaluations SET status = ?, total_score = ?, updated_at = ?, submitted_at = ?, revision = ? WHERE id = ?').run(status, validated.total, now, status === 'submitted' ? now : null, nextRevision, id);
-        await db.prepare('DELETE FROM evaluation_scores WHERE evaluation_id = ?').run(id);
-      } else id = (await db.prepare('INSERT INTO evaluations (team_id, jury_id, status, total_score, created_at, updated_at, submitted_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(teamId, req.user.id, status, validated.total, now, now, status === 'submitted' ? now : null, nextRevision)).lastInsertRowid;
-      if (validated.parsed.length) await db.prepare(`INSERT INTO evaluation_scores (evaluation_id, criterion_id, marks) VALUES ${validated.parsed.map(() => '(?, ?, ?)').join(',')}`).run(...validated.parsed.flatMap(s => [id, s.criterion_id, s.marks]));
-      await audit(req, status === 'submitted' ? 'SUBMIT_EVALUATION' : 'SAVE_DRAFT', 'evaluation', id, `Team ${teamId}`);
+      const id = (await db.prepare(`INSERT INTO evaluations (team_id, jury_id, status, total_score, created_at, updated_at, submitted_at, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(team_id, jury_id) DO UPDATE SET status = excluded.status, total_score = excluded.total_score,
+        updated_at = excluded.updated_at, submitted_at = excluded.submitted_at, revision = excluded.revision RETURNING id`)
+        .get(teamId, req.user.id, status, validated.total, now, now, status === 'submitted' ? now : null, nextRevision)).id;
+      const writes = [{ sql: 'DELETE FROM evaluation_scores WHERE evaluation_id = ?', args: [id] }];
+      if (validated.parsed.length) writes.push({ sql: `INSERT INTO evaluation_scores (evaluation_id, criterion_id, marks) VALUES ${validated.parsed.map(() => '(?, ?, ?)').join(',')}`, args: validated.parsed.flatMap(s => [id, s.criterion_id, s.marks]) });
+      writes.push({ sql: 'INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details) VALUES (?, ?, ?, ?, ?)', args: [req.user.id, status === 'submitted' ? 'SUBMIT_EVALUATION' : 'SAVE_DRAFT', 'evaluation', id, `Team ${teamId}`] });
+      await db.batch(writes);
     });
     res.json({
       message: req.body.action === 'submit' ? 'Evaluation submitted and locked' : 'Draft saved',
@@ -652,6 +707,7 @@ function createApp({
   });
   app.post('/api/jury/submit-all', jury, async (req, res) => {
     await db.transaction(async () => {
+      await assertRound(req);
       const teams = await juryTeams(req.user.id);
       if (!teams.length) fail('No teams are assigned.');
       const checked = [];
@@ -688,6 +744,7 @@ function createApp({
     const e = await get('evaluations', req.params.id),
       reason = text(req.body.reason, 'Unlock reason', 500);
     await db.transaction(async () => {
+      await assertRound(req);
       await db.prepare("UPDATE evaluations SET status = 'draft', submitted_at = NULL, updated_at = ?, revision = revision + 1 WHERE id = ?").run(new Date().toISOString(), e.id);
       await audit(req, 'UNLOCK_EVALUATION', 'evaluation', e.id, `Team ${e.team_id}; reason: ${reason}`);
     });
@@ -695,14 +752,13 @@ function createApp({
       message: 'Evaluation unlocked'
     });
   });
-  app.get('/api/leaderboard', admin, async (req, res) => res.json(await leaderboard()));
-  app.get('/api/audit-logs', admin, async (req, res) => res.json(await db.prepare(`SELECT a.*, COALESCE(u.username, 'Deleted user') AS user_name
+  app.get('/api/leaderboard', admin, async (req, res) => res.json(await leaderboard(await teamResults(req))));
+  app.get('/api/audit-logs', admin, async (req, res) => res.json(req.roundSnapshot ? [...req.roundSnapshot.tables.audit_logs].reverse().slice(0, 500).map(a => ({ ...a, user_name: req.roundSnapshot.tables.users.find(u => u.id === a.user_id)?.username || 'Deleted user' })) : await db.prepare(`SELECT a.*, COALESCE(u.username, 'Deleted user') AS user_name
         FROM audit_logs a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id DESC LIMIT 500`).all()));
   app.get('/api/reports/detailed-results', admin, async (req, res) => {
-    const { teams, criteria, scores } = await (db.readTransaction || db.transaction)(async () => ({
-      teams: await teamResults(), criteria: await rubric(),
-      scores: new Map((await db.prepare('SELECT * FROM evaluation_scores').all()).map(s => [`${s.evaluation_id}:${s.criterion_id}`, s.marks]))
-    }));
+    const tables = await readEvent(db, req, { scores: true });
+    const teams = resultViews(tables), criteria = tables.criteria.filter(c => c.active);
+    const scores = new Map(tables.evaluation_scores.map(s => [`${s.evaluation_id}:${s.criterion_id}`, s.marks]));
     const ranks = new Map((await leaderboard(teams)).map(t => [t.id, t.rank]));
     const maxJuries = Math.max(0, ...teams.map(t => t.juries_count));
     const header = ['Team Number', 'Team Name', 'Venue', 'Status', 'Assigned Juries', 'Submitted Juries', 'Maximum Score', 'Final Average', 'Rank'];
@@ -720,7 +776,7 @@ function createApp({
       lines.push(row.join(','));
     }
     res.set('Content-Type', 'text/csv; charset=utf-8');
-    res.set('Content-Disposition', 'attachment; filename="detailed_results.csv"');
+    res.set('Content-Disposition', `attachment; filename="detailed_results_round_${(req.selectedRound || req.activeRound).id}.csv"`);
     res.send('\uFEFF' + lines.join('\r\n') + '\r\n');
   });
   app.get('/api/backup', admin, async (req, res) => {
@@ -755,11 +811,14 @@ function createApp({
         await db.backup(path.join(backupDir, `before-reset-${Date.now()}.db`));
       }
       await db.transaction(async () => {
+      await assertRound(req);
         if (db.hosted) {
           const data = await snapshot(db);
           await db.prepare('INSERT INTO event_backups (data, created_at) VALUES (?, ?)').run(JSON.stringify(data), new Date().toISOString());
         }
+        await archiveRound(db, req.activeRound);
         await clearDb(db);
+        await db.prepare("INSERT INTO event_rounds (name) VALUES ('Round 1')").run();
         await audit(req, 'MASTER_RESET', 'system', null, 'Reset event; preserved audit history and a database backup');
       });
       res.json({
@@ -793,9 +852,7 @@ function createApp({
       console.error(error);
       message = 'The server could not complete the request. Your last saved data is retained.';
     }
-    res.status(status).json({
-      error: message
-    });
+    res.status(status).json({ error: message, ...(error.code === 'ROUND_CHANGED' ? { code: error.code } : {}) });
   });
   return app;
 }

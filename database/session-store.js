@@ -15,7 +15,9 @@ class SQLiteSessionStore extends session.Store {
             callback();
         } catch (error) { callback(error); }
     }
-    touch(sid, value, callback) { this.set(sid, value, callback); }
+    // Sessions have a fixed 12-hour expiry. Reads never rewrite the session or
+    // run cleanup queries, which would add two network trips to every click.
+    touch(sid, value, callback = () => {}) { callback(); }
     async destroy(sid, callback = () => {}) {
         try { await this.db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid); callback(); }
         catch (error) { callback(error); }

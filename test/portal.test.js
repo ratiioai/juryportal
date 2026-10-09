@@ -32,22 +32,30 @@ async function fixture(filename = ':memory:') {
     const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'juryportal-test-'));
     const db = openDatabase(process.env.JURY_TEST_MODE === 'cloud' && filename === ':memory:' ? path.join(backupDir, 'cloud.db') : filename);
     let applicationDb = db;
+    const measurement = { queries: 0 };
     if (process.env.JURY_TEST_MODE === 'cloud') {
         const client = require('@libsql/client').createClient({ url: pathToFileURL(db.name).href });
         applicationDb = cloudAdapter(client); await initializeCloud(applicationDb);
+        const prepare = applicationDb.prepare, batch = applicationDb.batch;
+        applicationDb.prepare = sql => {
+            const statement = prepare(sql);
+            return Object.fromEntries(Object.entries(statement).map(([method, work]) => [method, (...args) => { measurement.queries++; return work(...args); }]));
+        };
+        applicationDb.batch = (...args) => { measurement.queries++; return batch(...args); };
     }
     const server = createApp({ db: applicationDb, sessionSecret: secret, backupDir }).listen(0, '127.0.0.1');
     await once(server, 'listening');
     const base = `http://127.0.0.1:${server.address().port}`;
-    const client = (cookie = '') => ({ cookie,
+    const client = (cookie = '') => ({ cookie, round: null,
         async request(url, body, method = body === undefined ? 'GET' : 'POST', extra = {}) {
-            const headers = { 'X-Requested-With': 'JuryPortal', Cookie: this.cookie, ...extra };
+            const headers = { 'X-Requested-With': 'JuryPortal', Cookie: this.cookie, ...(this.round ? { 'X-Portal-Round': String(this.round) } : {}), ...extra };
             const options = { method, headers };
             if (body !== undefined) {
                 if (body instanceof FormData) options.body = body;
                 else { options.body = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
             }
             const response = await fetch(base + url, options);
+            if (response.ok && (method === 'GET' || ['/api/login', '/api/rounds'].includes(url)) && response.headers.get('x-portal-round')) this.round = Number(response.headers.get('x-portal-round'));
             if (response.headers.get('set-cookie')) this.cookie = response.headers.get('set-cookie').split(';')[0];
             const raw = await response.text();
             let data; try { data = JSON.parse(raw); } catch { data = raw; }
@@ -62,7 +70,7 @@ async function fixture(filename = ':memory:') {
     if ((await admin.request('/api/me')).data.must_change_password) {
         assert.equal((await admin.request('/api/password', { current_password: process.env.ADMIN_PASSWORD, new_password: adminPassword })).status, 200);
     }
-    return { db, admin, client, server, backupDir, base,
+    return { db, admin, client, server, backupDir, base, measurement,
         async close() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); if (applicationDb !== db) applicationDb.close(); db.close(); await removeFixture(backupDir); } };
 }
 async function setup(f) {
@@ -88,6 +96,116 @@ async function setup(f) {
     const save = (j, team, values, action = 'draft', revision = 0) => j.client.request('/api/evaluations', { team_id: team, action, scores: values, revision });
     return { venue, otherVenue, c1, c2, j1, j2, t1, t2, otherTeam, createJury, createTeam, scores, save };
 }
+
+test('new rounds retain historical scores, names and CSV while rejecting stale jury saves', async t => {
+    const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
+    assert.equal((await s.save(s.j1, s.t1, s.scores(7, 8), 'submit')).status, 200);
+    assert.equal((await s.save(s.j2, s.t1, s.scores(10, 10), 'submit')).status, 200);
+    assert.equal((await s.save(s.j1, s.t2, s.scores(4, ''))).status, 200);
+    const first = (await f.admin.request('/api/rounds')).data.active;
+    const csv = (await f.admin.request('/api/reports/detailed-results')).data;
+    const before = (await f.admin.request('/api/dashboard')).data;
+    const started = await f.admin.request('/api/rounds', { name: 'Round 2', keep_teams: true }, 'POST', { 'X-Portal-Round': String(first.id) });
+    assert.equal(started.status, 200, JSON.stringify(started.data));
+    const second = started.data.round;
+    assert.notEqual(second.id, first.id);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM evaluations').get().n, 0);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM evaluation_scores').get().n, 0);
+    const fresh = (await f.admin.request('/api/dashboard')).data;
+    assert.equal(fresh.totalTeams, before.totalTeams); assert.equal(fresh.activeJuries, before.activeJuries);
+    assert.equal(fresh.totalEvaluationsNeeded, before.totalEvaluationsNeeded); assert.equal(fresh.completedEvaluations, 0);
+    const stale = await s.j1.client.request('/api/evaluations', { team_id: s.t1, scores: s.scores(1, 1), action: 'draft', revision: 0 }, 'POST', { 'X-Portal-Round': String(first.id) });
+    assert.equal(stale.status, 409); assert.equal(stale.data.code, 'ROUND_CHANGED');
+    const missingRound = await s.j1.client.request('/api/evaluations', { team_id: s.t1, scores: s.scores(1, 1), action: 'draft', revision: 0 }, 'POST', { 'X-Portal-Round': '' });
+    assert.equal(missingRound.status, 409); assert.equal(missingRound.data.code, 'ROUND_CHANGED');
+    assert.equal((await s.j1.client.request('/api/evaluations/' + s.t1)).data.evaluation, null);
+    assert.equal((await s.save(s.j1, s.t1, s.scores(2, 3), 'submit')).status, 200);
+    await s.j2.client.request('/api/me');
+    assert.equal((await s.save(s.j2, s.t1, s.scores(4, 5), 'submit')).status, 200);
+    assert.equal((await f.admin.request('/api/leaderboard')).data[0].final_score, '7.00');
+    const historical = (await f.admin.request(`/api/teams?round=${first.id}`)).data;
+    assert.equal(historical.find(team => team.id === s.t1).final_score, '17.50');
+    assert.equal(historical.find(team => team.id === s.t2).evaluations_list[0].total_score, 4);
+    assert.equal((await f.admin.request(`/api/reports/detailed-results?round=${first.id}`)).data, csv);
+    assert.equal((await f.admin.request(`/api/leaderboard?round=${first.id}`)).data[0].final_score, '17.50');
+    assert.equal((await f.admin.request(`/api/dashboard?round=${first.id}`)).data.completedEvaluations, 2);
+    assert.equal((await f.admin.request(`/api/venues?round=${first.id}`)).data[0].name, 'Hall A');
+    assert.equal((await f.admin.request(`/api/juries?round=${first.id}`)).data[0].completed_evaluations, 1);
+    assert.equal((await s.j1.client.request(`/api/criteria?round=${first.id}`)).status, 403);
+    assert.equal((await f.admin.request(`/api/venues/${s.venue}?round=${first.id}`, { name: 'Wrong round', capacity: 100 }, 'PUT')).status, 409);
+    assert.equal((await f.admin.request(`/api/teams/${s.t1}`, { team_number: '001', team_name: 'Round two name', venue_id: s.venue }, 'PUT')).status, 200);
+    assert.equal((await f.admin.request(`/api/teams/${s.t1}?round=${first.id}`)).data.team.team_name, 'Team 001');
+    const history = (await f.admin.request('/api/rounds')).data;
+    assert.equal(history.rounds.length, 2); assert.doesNotMatch(JSON.stringify(history), /snapshot_json|password_hash/);
+    const archived = JSON.parse(f.db.prepare('SELECT snapshot_json FROM event_rounds WHERE id = ?').get(first.id).snapshot_json);
+    assert.equal(archived.tables.event_rounds, undefined);
+    assert.doesNotMatch(JSON.stringify(archived), /password_hash/);
+    const third = await f.admin.request('/api/rounds', { name: 'Final', keep_teams: false });
+    assert.equal(third.status, 200);
+    assert.equal((await f.admin.request('/api/teams')).data.length, 0);
+    assert.equal((await f.admin.request('/api/criteria')).data.length, 2);
+    assert.equal((await f.admin.request('/api/juries')).data.length, 2);
+    assert.equal((await f.admin.request(`/api/leaderboard?round=${second.id}`)).data[0].final_score, '7.00');
+    if (process.env.JURY_TEST_MODE === 'cloud') {
+        const backup = (await f.admin.request('/api/backup')).data;
+        const recoveredPath = restoreSnapshot(backup, path.join(f.backupDir, 'round-history-recovery.db'));
+        const recovered = openDatabase(recoveredPath);
+        try { assert.equal(recovered.prepare('SELECT COUNT(*) AS n FROM event_rounds').get().n, 3); }
+        finally { recovered.close(); }
+    }
+});
+
+test('a failed round transition rolls back and simultaneous transitions cannot overwrite history', async t => {
+    const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
+    await s.save(s.j1, s.t1, s.scores(5, 5));
+    const first = (await f.admin.request('/api/rounds')).data.active;
+    f.db.exec("CREATE TRIGGER reject_test_round BEFORE INSERT ON event_rounds WHEN NEW.name = 'Fail round' BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+    assert.notEqual((await f.admin.request('/api/rounds', { name: 'Fail round' })).status, 200);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM evaluations').get().n, 1);
+    assert.equal(f.db.prepare('SELECT snapshot_json FROM event_rounds WHERE id = ?').get(first.id).snapshot_json, null);
+    f.db.exec('DROP TRIGGER reject_test_round');
+    const otherAdmin = f.client();
+    assert.equal((await otherAdmin.request('/api/login', { username: 'admin', password: adminPassword })).status, 200);
+    const results = await Promise.all([f.admin.request('/api/rounds', { name: 'Round 2 A' }, 'POST', { 'X-Portal-Round': String(first.id) }),
+        otherAdmin.request('/api/rounds', { name: 'Round 2 B' }, 'POST', { 'X-Portal-Round': String(first.id) })]);
+    assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM event_rounds').get().n, 2);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM event_rounds WHERE archived_at IS NULL').get().n, 1);
+    assert.equal((await f.admin.request(`/api/teams?round=${first.id}`)).data.find(team => team.id === s.t1).evaluations_list[0].total_score, 10);
+});
+
+test('the round migration preserves existing teams, drafts and administrator credentials', async t => {
+    const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
+    await s.save(s.j1, s.t1, s.scores(6, 7));
+    const originalHash = f.db.prepare("SELECT password_hash FROM users WHERE role = 'admin'").get().password_hash;
+    f.db.exec('DROP TABLE event_rounds');
+    if (process.env.JURY_TEST_MODE === 'cloud') {
+        f.db.prepare("UPDATE portal_meta SET value = '1' WHERE key = 'schema_version'").run();
+        const client = require('@libsql/client').createClient({ url: pathToFileURL(f.db.name).href });
+        try { await initializeCloud(cloudAdapter(client)); } finally { client.close(); }
+        assert.equal(f.db.prepare("SELECT value FROM portal_meta WHERE key = 'schema_version'").get().value, '2');
+    } else f.db.exec(fs.readFileSync(path.join(__dirname, '../database/schema.sql'), 'utf8'));
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM event_rounds').get().n, 1);
+    assert.equal(f.db.prepare('SELECT name FROM event_rounds').get().name, 'Round 1');
+    assert.equal(f.db.prepare('SELECT total_score FROM evaluations WHERE team_id = ?').get(s.t1).total_score, 13);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM teams').get().n, 3);
+    assert.equal(f.db.prepare("SELECT password_hash FROM users WHERE role = 'admin'").get().password_hash, originalHash);
+});
+
+test('hosted dashboard and evaluation reads use three database trips, with no session writes', async t => {
+    if (process.env.JURY_TEST_MODE !== 'cloud') return t.skip('Remote query-count verification');
+    const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
+    for (const [client, route] of [[f.admin, '/api/dashboard'], [f.admin, '/api/teams'], [s.j1.client, '/api/jury/workspace'], [s.j1.client, `/api/evaluations/${s.t1}`]]) {
+        f.measurement.queries = 0;
+        const response = await client.request(route);
+        assert.equal(response.status, 200);
+        assert.equal(f.measurement.queries, 3, `${route} must use session read, authorization read and one data batch`);
+        assert.match(response.headers.get('server-timing'), /app;dur=/);
+    }
+    f.measurement.queries = 0;
+    assert.equal((await s.save(s.j1, s.t1, s.scores(5, 6))).status, 200);
+    assert.equal(f.measurement.queries, 5, 'Saving should use two authentication reads, one validation batch, one evaluation write and one score/audit batch');
+});
 
 test('authentication, CSRF, inactive accounts and session revocation', async t => {
     const f = await fixture(); t.after(() => f.close()); const s = await setup(f);
